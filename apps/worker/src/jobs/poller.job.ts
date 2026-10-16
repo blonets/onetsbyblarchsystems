@@ -40,6 +40,14 @@ export interface PollerJobData {
   shardCount: number;
 }
 
+export interface PollerSessionReport {
+  username: string;
+  address?: string;
+  macAddress?: string;
+  uptime?: string;
+  server?: string;
+}
+
 export interface PollerDeps {
   manager: ConnectionManager;
   listRouterIds: () => Promise<string[]>;
@@ -50,6 +58,8 @@ export interface PollerDeps {
   staggerMs?: number;
   /** activity callback so the health monitor counts polls as heartbeats */
   noteActivity?: (routerId: string) => void;
+  /** optional active-sessions callback so the API session index stays fresh */
+  reportSessions?: (routerId: string, sessions: PollerSessionReport[]) => Promise<void> | void;
   now?: () => number;
 }
 
@@ -89,8 +99,20 @@ export function createPollerProcessor(deps: PollerDeps) {
       }
       const tickStart = now();
       try {
-        const batch = await pollRouter(deps.manager, routerId, tracker, now);
+        let activeSessions: PollerSessionReport[] = [];
+        const batch = await pollRouter(deps.manager, routerId, tracker, now, (rows) => {
+          activeSessions = rows
+            .filter((r) => !!r['user'])
+            .map((r) => ({
+              username: r['user']!,
+              ...(r['address'] ? { address: r['address'] } : {}),
+              ...(r['mac-address'] ? { macAddress: r['mac-address'] } : {}),
+              ...(r['uptime'] ? { uptime: r['uptime'] } : {}),
+              ...(r['server'] ? { server: r['server'] } : {}),
+            }));
+        });
         await deps.ingest.ingest(batch);
+        await Promise.resolve(deps.reportSessions?.(routerId, activeSessions)).catch(() => undefined);
         deps.manager.recordProbe(routerId, true);
         deps.noteActivity?.(routerId);
         const gapSec = gaps.observe(routerId, tickStart, cadenceSec);
@@ -111,6 +133,7 @@ export async function pollRouter(
   routerId: string,
   tracker: RateTracker,
   now: () => number = Date.now,
+  onActiveRows?: (rows: Record<string, string>[]) => void,
 ) {
   const ts = new Date(now()).toISOString();
   return manager.execute(routerId, async (conn) => {
@@ -130,13 +153,15 @@ export async function pollRouter(
       }
     }
     const activeReplies = await conn.talk(hotspotActiveList());
+    const activeRows = replyRows(activeReplies);
+    onActiveRows?.(activeRows);
     const userReplies = await conn.talk(hotspotUserList());
     return normalizeMetrics({
       ts,
       routerId,
       resource: replyRows(resourceReplies)[0] ?? {},
       traffic: trafficRows,
-      hotspotActive: replyRows(activeReplies).length,
+      hotspotActive: activeRows.length,
       hotspotUsers: replyRows(userReplies).length,
       tracker,
     });

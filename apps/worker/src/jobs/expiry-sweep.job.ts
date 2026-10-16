@@ -56,8 +56,12 @@ export type HotspotExpiryMode = 'disable' | 'remove' | 'remove+notify';
 /** One platform (API) hotspot-user record, as the sweep consumes it. */
 export interface ExpirySweepUser {
   name: string;
-  /** ISO-8601; null/undefined = no expiry → never swept. */
+  /** ISO-8601; null/undefined = no absolute expiry. */
   expiresAt?: string | null;
+  /** First-login validity clock fields (computed alongside expiresAt). */
+  validityFromFirstLogin?: boolean;
+  validitySeconds?: number | null;
+  firstLoginAt?: string | null;
   /** Defaults to 'disable' when absent. */
   expiryMode?: string | null;
   disabled?: boolean;
@@ -68,9 +72,10 @@ export interface ExpirySweepUser {
  * of truth).
  *
  * Default HTTP implementation: `GET /internal/worker/routers/:id/hotspot-users`
- * with the worker service bearer token (mirrors the provision-info pattern in
+ * with the shared `x-internal-key` header (mirrors the provision-info pattern in
  * main.ts). Contract for the API side:
- * `{ users: Array<{ name, expiresAt, expiryMode, disabled }> }`.
+ * either an array `Array<{ name, expiresAt, expiryMode, disabled, ... }>` or
+ * `{ users: Array<...> }`.
  * A 404 means "no hotspot data for this router" → treated as no users.
  */
 export interface HotspotUserDirectory {
@@ -87,12 +92,12 @@ export class HttpHotspotUserDirectory implements HotspotUserDirectory {
   async listUsers(routerId: string): Promise<ExpirySweepUser[]> {
     const res = await this.fetchImpl(
       `${this.baseUrl}/internal/worker/routers/${encodeURIComponent(routerId)}/hotspot-users`,
-      { headers: { authorization: `Bearer ${this.serviceToken}` } },
+      { headers: { 'x-internal-key': this.serviceToken } },
     );
     if (res.status === 404) return [];
     if (!res.ok) throw new Error(`hotspot user directory fetch failed: HTTP ${res.status}`);
-    const body = (await res.json()) as { users?: ExpirySweepUser[] };
-    return body.users ?? [];
+    const body = (await res.json()) as { users?: ExpirySweepUser[] } | ExpirySweepUser[];
+    return Array.isArray(body) ? body : (body.users ?? []);
   }
 }
 
@@ -150,6 +155,26 @@ export function isExpired(expiresAt: string | null | undefined, nowMs: number): 
   if (!expiresAt) return false;
   const t = Date.parse(expiresAt);
   return Number.isFinite(t) && t <= nowMs;
+}
+
+/** Resolve the earliest passed expiry timestamp (absolute or first-login validity). */
+export function resolveExpiredAt(user: ExpirySweepUser, nowMs: number): string | null {
+  const candidates: number[] = [];
+  if (user.expiresAt) {
+    const abs = Date.parse(user.expiresAt);
+    if (Number.isFinite(abs) && abs <= nowMs) candidates.push(abs);
+  }
+  if (user.validityFromFirstLogin && user.validitySeconds && user.firstLoginAt) {
+    const first = Date.parse(user.firstLoginAt);
+    if (Number.isFinite(first)) {
+      const val = first + user.validitySeconds * 1000;
+      if (val <= nowMs) candidates.push(val);
+    }
+  }
+  if (candidates.length === 0) return null;
+  const earliest = Math.min(...candidates);
+  if (user.expiresAt && Date.parse(user.expiresAt) === earliest) return user.expiresAt;
+  return new Date(earliest).toISOString();
 }
 
 function isNoSuchCommand(err: unknown): boolean {
@@ -211,7 +236,8 @@ export function createExpirySweepProcessor(deps: ExpirySweepDeps) {
 
         const nowMs = now();
         for (const platformUser of platformUsers) {
-          if (!isExpired(platformUser.expiresAt, nowMs)) continue;
+          const expiredAt = resolveExpiredAt(platformUser, nowMs);
+          if (!expiredAt) continue;
           evaluated += 1;
           const deviceUser = byName.get(platformUser.name);
           // Not on the router: nothing to enforce (API record only).
@@ -219,7 +245,7 @@ export function createExpirySweepProcessor(deps: ExpirySweepDeps) {
           const mode = normalizeExpiryMode(platformUser.expiryMode);
           const userSessions = sessionsByUser.get(deviceUser.name) ?? [];
           const violation = await enforce(
-            opId, routerId, deviceUser, platformUser.expiresAt!, mode, userSessions, conn,
+            opId, routerId, deviceUser, expiredAt, mode, userSessions, conn,
           );
           if (violation) swept.push(violation);
         }

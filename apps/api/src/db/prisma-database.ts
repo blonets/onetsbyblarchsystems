@@ -65,9 +65,12 @@ export class PrismaDatabase implements DbPort {
   readonly hotspotServers: DbPort['hotspotServers'];
   readonly hotspotProfiles: DbPort['hotspotProfiles'];
   readonly hotspotUserProfiles: DbPort['hotspotUserProfiles'];
+  readonly hotspotBatches: DbPort['hotspotBatches'];
+  readonly hotspotActiveSessions: DbPort['hotspotActiveSessions'];
   readonly hotspotUsers: DbPort['hotspotUsers'];
   readonly hotspotWalledGardens: DbPort['hotspotWalledGardens'];
   readonly firewallRules: DbPort['firewallRules'];
+  readonly firewallJournals: DbPort['firewallJournals'];
   readonly queues: DbPort['queues'];
   readonly backups: DbPort['backups'];
   readonly backupSchedules: DbPort['backupSchedules'];
@@ -90,9 +93,12 @@ export class PrismaDatabase implements DbPort {
     this.hotspotServers = t((db) => db.hotspotServer);
     this.hotspotProfiles = t((db) => db.hotspotProfile);
     this.hotspotUserProfiles = t((db) => db.hotspotUserProfile);
+    this.hotspotBatches = t((db) => db.hotspotBatch);
+    this.hotspotActiveSessions = t((db) => db.hotspotActiveSession);
     this.hotspotUsers = t((db) => db.hotspotUser);
     this.hotspotWalledGardens = t((db) => db.hotspotWalledGarden);
     this.firewallRules = t((db) => db.firewallRule);
+    this.firewallJournals = t((db) => db.firewallJournal);
     this.queues = t((db) => db.queue);
     this.backups = t((db) => db.backup);
     this.backupSchedules = t((db) => db.backupSchedule);

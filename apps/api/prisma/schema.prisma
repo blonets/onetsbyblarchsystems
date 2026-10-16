@@ -134,6 +134,7 @@ model Router {
   boardName       String? // e.g. "hAP ac^2"
   serialNumber    String?
   identityName    String? // /system identity name (site slug)
+  tags            String[] @default([]) // free-form grouping labels, e.g. ["cairo","vip"]
   flapCount       Int     @default(0) // tunnel flaps in last hour (worker-maintained)
   pollerShard     Int     @default(0) // hash(uuid) % shards; assigned by worker
 
@@ -141,9 +142,12 @@ model Router {
   hotspotServers HotspotServer[]
   hotspotProfiles HotspotProfile[] // server-profiles
   hotspotUserProfiles HotspotUserProfile[] // user-profiles (plans)
+  hotspotBatches HotspotBatch[] // voucher/credential generation batches
+  hotspotActiveSessions HotspotActiveSession[] // worker-reported online sessions
   hotspotUsers   HotspotUser[]
   hotspotWalledGardens HotspotWalledGarden[]
   firewallRules  FirewallRule[]
+  firewallJournals FirewallJournal[] // rollback journal for firewall changes
   queues         Queue[]
   backups        Backup[]
   backupSchedules BackupSchedule[]
@@ -230,11 +234,51 @@ model HotspotUserProfile {
   keepaliveTimeout String?
   quotaBytes       BigInt? // enforced by quota-enforcer (null = unlimited)
   quotaSeconds     Int?
+  macAddress       String? // pinned MAC (platform-side; RouterOS has no native user↔MAC pin)
+  limitUptime      String? // total session cap, e.g. "12:00:00" → device `limit-uptime`
+  validitySeconds  Int?    // validity window (s) starting at FIRST login — distinct from limitUptime
+  price            Float?  // voucher face value (revenue tile); null = unset → 0
+  expiryMode       String  @default("none") // remove | notify | remove+notify | none
   mikrotikId       String?
   users            HotspotUser[]
 
   @@unique([routerId, name])
   @@index([routerId])
+}
+
+/// One voucher/credential generation batch (one BullMQ job, idempotent by opId).
+model HotspotBatch {
+  id         String   @id @default(cuid())
+  router     Router   @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId   String
+  mode       String   // up | vc
+  prefix     String   @default("")
+  count      Int
+  codeLength Int
+  profileId  String?
+  note       String?
+  opId       String   @unique // idempotency key for the whole batch
+  users      HotspotUser[]
+  createdAt  DateTime @default(now())
+
+  @@index([routerId])
+}
+
+/// Worker-reported active hotspot sessions (/ip/hotspot/active). Replaced wholesale
+/// on every poller ingest — a read model for session search, not history.
+model HotspotActiveSession {
+  id         String   @id @default(cuid())
+  router     Router   @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId   String
+  username   String
+  address    String?  // session IP
+  macAddress String?
+  uptime     String?
+  server     String?
+  reportedAt DateTime @default(now())
+
+  @@index([routerId])
+  @@index([username])
 }
 
 model HotspotUser {
@@ -245,17 +289,30 @@ model HotspotUser {
   passwordRef String? // Vault/KMS reference; null for MAC-cookie users
   profile     HotspotUserProfile? @relation(fields: [profileId], references: [id])
   profileId   String?
+  mode        String?  // up | vc — generation mode (null = single manual create)
+  batch       HotspotBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  batchId     String?
+  /// Clock model: validityFromFirstLogin=false → expiresAt is absolute;
+  /// true → validitySeconds count from firstLoginAt. Explicitly distinct from
+  /// limitUptime (total session cap pushed to the device).
+  validityFromFirstLogin Boolean @default(false)
+  validitySeconds Int?     // validity window (s) from first login
+  limitUptime     String?  // total session cap, e.g. "12:00:00" → device `limit-uptime`
+  firstLoginAt    DateTime? // first auth seen by the worker (starts the validity clock)
+  macAddress      String?  // pinned MAC (see HotspotUserProfile.macAddress)
+  expiryMode      String   @default("none") // remove | notify | remove+notify | none
   disabled    Boolean            @default(false)
   uptimeUsedS BigInt             @default(0) // reconciled from /ip/hotspot/user
   bytesIn     BigInt             @default(0)
   bytesOut    BigInt             @default(0)
-  expiresAt   DateTime?
-  comment     String?
+  expiresAt   DateTime? // absolute expiry (legacy); user expires when EITHER clock passes
+  comment     String? // batch encoding: vc-<batchId>-<YYYYMMDD>-<note>
   mikrotikId  String?
   createdAt   DateTime           @default(now())
 
   @@unique([routerId, name])
   @@index([routerId, disabled])
+  @@index([batchId])
 }
 
 // ---------------------------------------------------------------------------
@@ -283,9 +340,35 @@ model FirewallRule {
   comment      String? // panel-managed rules use comment prefixes, e.g. panel-proxy:
   disabled     Boolean @default(false)
   managed      Boolean @default(true) // false = discovered, read-only in UI
+  /// Soft-delete marker set by firewall rollback: the rule is disabled
+  /// on-device but the mirror row is kept (with the journal) — rollback never
+  /// hard-deletes a journaled rule.
+  revoked      Boolean @default(false)
   mikrotikId   String?
 
   @@index([routerId, table, chain, order])
+}
+
+/// Rollback journal for firewall changes. Written BEFORE any firewall
+/// mutation is applied; `POST .../firewall/rollback/:journalId` restores the
+/// before-snapshot. Journaled rules are revoked (disabled), never hard-deleted.
+model FirewallJournal {
+  id      String @id @default(cuid())
+  router  Router @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId String
+  opId    String @unique // idempotency key of the journaled command
+  action  String // e.g. firewall.rule.create
+  table   String
+  chain   String?
+  ruleId  String? // platform rule id the op targeted (null for creates)
+  before  Json    // before-snapshot of affected mirror rows (FirewallRule[])
+  createdRuleIds Json @default("[]") // mirror rows created by the op (rollback revokes these)
+  sentences Json   // exact sentences applied (string[][])
+  status  String  @default("pending") // pending | applied | rolled-back
+  createdAt DateTime @default(now())
+  rolledBackAt DateTime?
+
+  @@index([routerId])
 }
 
 // ---------------------------------------------------------------------------

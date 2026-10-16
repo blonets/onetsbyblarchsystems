@@ -116,7 +116,7 @@ export class MonitoringService {
         routerId, uuid: router.uuid, at, cause: input.cause,
       });
       this.logger.warn(`router ${routerId} went offline (cause=${input.cause ?? 'heartbeat-missed'})`);
-    } else if (input.status === 'online' && prev === 'offline') {
+    } else if (input.status === 'online' && prev !== 'online') {
       await this.closeOpenDowntimes(routerId, now);
       this.events.emitEvent('router.online', {
         routerId, uuid: router.uuid, tunnelIp: router.tunnelIp, at,
@@ -139,14 +139,17 @@ export class MonitoringService {
    * Worker/internal endpoint: replace the router's reported active hotspot
    * sessions wholesale. The poller reports the full `/ip/hotspot/active`
    * list each cycle; this table is a read model for session search, not
-   * history — stale rows are deleted, not kept.
+   * history — stale rows are deleted, not kept. Also stamps `firstLoginAt`
+   * on any managed HotspotUser logging in for the first time.
    */
   async ingestSessions(routerId: string, sessions: SessionReport[]): Promise<{ stored: number }> {
     const router = await this.db.routers.findUnique({ id: routerId });
     if (!router) throw new NotFoundException(`router ${routerId} not found`);
     await this.db.hotspotActiveSessions.deleteMany({ routerId });
     const now = new Date();
+    const seenNames = new Set<string>();
     for (const s of sessions) {
+      seenNames.add(s.username);
       await this.db.hotspotActiveSessions.create({
         routerId,
         username: s.username,
@@ -155,6 +158,14 @@ export class MonitoringService {
         uptime: s.uptime ?? null,
         server: s.server ?? null,
       });
+    }
+    if (seenNames.size > 0) {
+      const users = await this.db.hotspotUsers.findMany({ where: { routerId } });
+      for (const u of users) {
+        if (!u.firstLoginAt && seenNames.has(u.name)) {
+          await this.db.hotspotUsers.update({ id: u.id }, { firstLoginAt: now }).catch(() => undefined);
+        }
+      }
     }
     await this.db.routers.update({ id: routerId }, { lastSeen: now }).catch(() => undefined);
     return { stored: sessions.length };

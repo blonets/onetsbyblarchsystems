@@ -27,12 +27,23 @@ export interface EncryptedEnvelope {
 /** Resolve the 32-byte backup key from the runtime environment. */
 export function resolveBackupKey(env: NodeJS.ProcessEnv = process.env): Buffer {
   const hex = env['BACKUP_KMS_KEY'];
-  if (!hex || !/^[0-9a-fA-F]{64}$/.test(hex)) {
-    throw new Error(
-      'BACKUP_KMS_KEY must be set to 64 hex chars (32 bytes) — refusing to encrypt without a key',
-    );
+  if (hex) {
+    if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+      throw new Error(
+        'BACKUP_KMS_KEY must be set to 64 hex chars (32 bytes) — refusing to encrypt without a key',
+      );
+    }
+    return Buffer.from(hex, 'hex');
   }
-  return Buffer.from(hex, 'hex');
+  const fallback = env['VAULT_MASTER_KEY']?.trim();
+  if (fallback) {
+    if (/^[0-9a-fA-F]{64}$/.test(fallback)) return Buffer.from(fallback, 'hex');
+    const b64 = Buffer.from(fallback, 'base64');
+    if (b64.length === 32) return b64;
+  }
+  throw new Error(
+    'BACKUP_KMS_KEY must be set to 64 hex chars (32 bytes) — refusing to encrypt without a key',
+  );
 }
 
 export function encryptBackup(plaintext: Uint8Array, key: Buffer): EncryptedEnvelope {

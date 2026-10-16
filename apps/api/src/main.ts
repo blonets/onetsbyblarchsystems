@@ -6,6 +6,13 @@ import { getCorsOptions } from './common/cors.js';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
+  // Accept both `/api/v1/*` (web UI HttpApiClient & router onboarding scripts)
+  // and unprefixed `/*` (internal worker & healthcheck) routes.
+  app.use((req: { url: string }, _res: unknown, next: () => void) => {
+    if (req.url === '/api/v1') req.url = '/';
+    else if (req.url.startsWith('/api/v1/')) req.url = req.url.slice('/api/v1'.length);
+    next();
+  });
   // CORS allowlist is env-driven (CORS_ORIGINS); the production panel host
   // https://admin.onetsbyblarch.online must be listed or the web UI's REST
   // and Socket.IO calls are blocked.

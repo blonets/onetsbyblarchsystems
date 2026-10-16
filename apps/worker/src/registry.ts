@@ -15,6 +15,8 @@ export interface RouterEndpoint {
   host: string;
   /** per-router configurable RouterOS API port (never hard-coded) */
   apiPort: number;
+  /** per-router configurable FTP port (defaults to 21 when absent) */
+  ftpPort?: number;
   username: string;
   /** resolved from the environment / vault at runtime — never persisted */
   password: string;

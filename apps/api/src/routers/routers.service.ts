@@ -48,6 +48,7 @@ export class RoutersService {
       boardName: dto.boardName ?? null,
       routerOsVersion: dto.routerOsVersion ?? null,
       status: 'pending',
+      tags: dto.tags ?? [],
     };
     const row = await this.db.routers.create(data);
     await this.audit.append({
@@ -67,20 +68,50 @@ export class RoutersService {
     pageSize?: number;
     siteId?: string;
     status?: RouterStatus;
+    tag?: string;
   } = {}): Promise<Paginated<Router>> {
     const page = opts.page ?? 1;
     const pageSize = Math.min(opts.pageSize ?? 50, 500);
     const where: Record<string, unknown> = {};
     if (opts.siteId) where.siteId = opts.siteId;
     if (opts.status) where.status = opts.status;
-    const total = await this.db.routers.count(where);
-    const rows = await this.db.routers.findMany({
+    const total = opts.tag
+      ? (await this.db.routers.findMany({ where })).filter((r) => (r.tags ?? []).includes(opts.tag!)).length
+      : await this.db.routers.count(where);
+    let rows = await this.db.routers.findMany({
       where,
       orderBy: { createdAt: 'desc' },
-      skip: (page - 1) * pageSize,
-      take: pageSize,
+      ...(!opts.tag ? { skip: (page - 1) * pageSize, take: pageSize } : {}),
     });
+    // Tag filtering is done in the service (not the port contract) so both
+    // the Prisma adapter and the in-memory fake behave identically.
+    if (opts.tag) {
+      rows = rows
+        .filter((r) => (r.tags ?? []).includes(opts.tag!))
+        .slice((page - 1) * pageSize, page * pageSize);
+    }
     return { items: rows.map(toDto), total, page, pageSize };
+  }
+
+  /**
+   * Resolve a router selector ({ routerIds?, tag? }) to concrete router ids.
+   * Used by tag-based bulk operations.
+   */
+  async resolveSelector(selector: { routerIds?: string[]; tag?: string }): Promise<string[]> {
+    const ids = new Set<string>();
+    if (selector.routerIds) {
+      for (const id of selector.routerIds) {
+        const r = await this.db.routers.findUnique({ id });
+        if (r && r.status !== 'decommissioned') ids.add(r.id);
+      }
+    }
+    if (selector.tag) {
+      const rows = await this.db.routers.findMany({});
+      for (const r of rows) {
+        if (r.status !== 'decommissioned' && (r.tags ?? []).includes(selector.tag)) ids.add(r.id);
+      }
+    }
+    return [...ids];
   }
 
   async findOne(id: string): Promise<Router> {
@@ -102,7 +133,7 @@ export class RoutersService {
     for (const k of [
       'siteId', 'apiPort', 'apiSslPort', 'winboxPort', 'sshPort',
       'telnetPort', 'ftpPort', 'wwwPort', 'identityName', 'boardName',
-      'routerOsVersion', 'serialNumber', 'status',
+      'routerOsVersion', 'serialNumber', 'status', 'tags',
     ] as const) {
       if (dto[k] !== undefined) patch[k] = dto[k];
     }
@@ -198,6 +229,7 @@ export class RoutersService {
       apiUsername: r.apiUsername,
       apiPasswordRef: r.apiPasswordRef,
       apiPort: r.apiPort,
+      ftpPort: r.ftpPort,
       identityName: r.identityName,
       status: r.status,
     };
@@ -242,11 +274,13 @@ export interface WorkerRouterView {
   apiUsername: string;
   apiPasswordRef: string;
   apiPort: number;
+  ftpPort: number;
   identityName: string | null;
   status: RouterStatus;
 }
 
-export function toDto(r: RouterRow): Router {  return {
+export function toDto(r: RouterRow): Router {
+  return {
     id: r.id,
     uuid: r.uuid,
     siteId: r.siteId,
@@ -266,6 +300,7 @@ export function toDto(r: RouterRow): Router {  return {
     boardName: r.boardName,
     serialNumber: r.serialNumber,
     identityName: r.identityName,
+    tags: r.tags ?? [],
     flapCount: r.flapCount,
     pollerShard: r.pollerShard,
     createdAt: r.createdAt.toISOString(),

@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException, type OnModuleInit } from '@nestjs/common';
 import type { RoleName, User } from '@mtk/types';
 import { DB_PORT, type DbPort, type NewUser } from '../db/database.port.js';
 import { hashPassword } from './password.js';
@@ -10,8 +10,32 @@ export const ROLE_NAMES: RoleName[] = ['viewer', 'technician', 'operator', 'admi
  * Passwords are bcrypt hashes; the plaintext never hits the DB.
  */
 @Injectable()
-export class UsersService {
+export class UsersService implements OnModuleInit {
   constructor(@Inject(DB_PORT) private readonly db: DbPort) {}
+
+  async onModuleInit(): Promise<void> {
+    await this.ensureRoles();
+    if (process.env.NODE_ENV === 'test') return;
+    const count = await this.db.users.count({});
+    const seedPw = process.env.ADMIN_PASSWORD ?? process.env.SSTP_HUB_API_PASSWORD;
+    if (count === 0 && seedPw && seedPw.length >= 8) {
+      const primaryEmail = (process.env.ADMIN_EMAIL ?? 'admin@onetsbyblarch.online').trim().toLowerCase();
+      await this.create({
+        email: primaryEmail,
+        name: 'Platform Admin',
+        password: seedPw,
+        role: 'admin',
+      }).catch(() => undefined);
+      if (primaryEmail !== 'admin@fleet.local') {
+        await this.create({
+          email: 'admin@fleet.local',
+          name: 'Platform Admin',
+          password: seedPw,
+          role: 'admin',
+        }).catch(() => undefined);
+      }
+    }
+  }
 
   /** Idempotent: creates the four platform roles if missing. */
   async ensureRoles(): Promise<void> {

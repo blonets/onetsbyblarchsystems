@@ -47,13 +47,22 @@ export class InternalWorkerController {
    */
   @Get('routers/:id/endpoint')
   async endpoint(@Param('id') id: string) {
-    const view = await this.routers.getWorkerView(id);
+    let view;
+    try {
+      view = await this.routers.getWorkerView(id);
+    } catch (err) {
+      if (id === 'hub') {
+        return this.provisioning.getHubEndpoint();
+      }
+      throw err;
+    }
     const password = await this.vault.retrieve(view.apiPasswordRef);
     return {
       routerId: view.id,
       uuid: view.uuid,
       host: view.tunnelIp,
       apiPort: view.apiPort,
+      ftpPort: view.ftpPort,
       username: view.apiUsername,
       password,
       ...(view.identityName ? { identity: view.identityName } : {}),

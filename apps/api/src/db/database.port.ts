@@ -4,7 +4,10 @@ import type {
   BackupScheduleRow,
   DownstreamDeviceRow,
   DowntimeRow,
+  FirewallJournalRow,
   FirewallRuleRow,
+  HotspotActiveSessionRow,
+  HotspotBatchRow,
   HotspotProfileRow,
   HotspotServerRow,
   HotspotUserProfileRow,
@@ -64,9 +67,12 @@ export interface DbPort {
   hotspotServers: Table<HotspotServerRow, NewHotspotServer>;
   hotspotProfiles: Table<HotspotProfileRow, NewHotspotProfile>;
   hotspotUserProfiles: Table<HotspotUserProfileRow, NewHotspotUserProfile>;
+  hotspotBatches: Table<HotspotBatchRow, NewHotspotBatch>;
+  hotspotActiveSessions: Table<HotspotActiveSessionRow, NewHotspotActiveSession>;
   hotspotUsers: Table<HotspotUserRow, NewHotspotUser>;
   hotspotWalledGardens: Table<HotspotWalledGardenRow, NewHotspotWalledGarden>;
   firewallRules: Table<FirewallRuleRow, NewFirewallRule>;
+  firewallJournals: Table<FirewallJournalRow, NewFirewallJournal>;
   queues: Table<QueueRow, NewQueue>;
   backups: Table<BackupRow, NewBackup>;
   backupSchedules: Table<BackupScheduleRow, NewBackupSchedule>;
@@ -127,6 +133,7 @@ export interface NewRouter {
   serialNumber?: string | null;
   identityName?: string | null;
   pollerShard?: number;
+  tags?: string[];
 }
 export interface NewDowntime {
   routerId: string;
@@ -158,12 +165,43 @@ export interface NewHotspotUserProfile {
   keepaliveTimeout?: string | null;
   quotaBytes?: bigint | null;
   quotaSeconds?: number | null;
+  macAddress?: string | null;
+  limitUptime?: string | null;
+  validitySeconds?: number | null;
+  price?: number | null;
+  expiryMode?: string;
+}
+export interface NewHotspotBatch {
+  routerId: string;
+  mode: string;
+  prefix?: string;
+  count: number;
+  codeLength: number;
+  profileId?: string | null;
+  note?: string | null;
+  opId: string;
+}
+export interface NewHotspotActiveSession {
+  routerId: string;
+  username: string;
+  address?: string | null;
+  macAddress?: string | null;
+  uptime?: string | null;
+  server?: string | null;
 }
 export interface NewHotspotUser {
   routerId: string;
   name: string;
   passwordRef?: string | null;
   profileId?: string | null;
+  mode?: string | null;
+  batchId?: string | null;
+  validityFromFirstLogin?: boolean;
+  validitySeconds?: number | null;
+  limitUptime?: string | null;
+  firstLoginAt?: Date | null;
+  macAddress?: string | null;
+  expiryMode?: string;
   disabled?: boolean;
   expiresAt?: Date | null;
   comment?: string | null;
@@ -195,6 +233,19 @@ export interface NewFirewallRule {
   comment?: string | null;
   disabled?: boolean;
   managed?: boolean;
+  revoked?: boolean;
+}
+export interface NewFirewallJournal {
+  routerId: string;
+  opId: string;
+  action: string;
+  table: string;
+  chain?: string | null;
+  ruleId?: string | null;
+  before: unknown;
+  createdRuleIds?: unknown;
+  sentences: unknown;
+  status?: string;
 }
 export interface NewQueue {
   routerId: string;

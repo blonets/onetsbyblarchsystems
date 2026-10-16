@@ -1,5 +1,5 @@
 import { Body, Controller, Get, HttpCode, Post } from '@nestjs/common';
-import { IsString, MinLength } from 'class-validator';
+import { IsOptional, IsString, MinLength } from 'class-validator';
 import type { AuthTokens, LoginResponse, User } from '@mtk/types';
 import { AuthService } from './auth.service.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
@@ -11,6 +11,12 @@ class RefreshDto {
   @IsString()
   @MinLength(10)
   refreshToken!: string;
+}
+
+class LogoutDto {
+  @IsOptional()
+  @IsString()
+  refreshToken?: string;
 }
 
 @Controller('auth')
@@ -35,8 +41,10 @@ export class AuthController {
   @Public()
   @Post('logout')
   @HttpCode(204)
-  async logout(@Body() dto: RefreshDto): Promise<void> {
-    await this.auth.logout(dto.refreshToken);
+  async logout(@Body() dto?: LogoutDto): Promise<void> {
+    if (dto?.refreshToken) {
+      await this.auth.logout(dto.refreshToken);
+    }
   }
 
   @Get('me')

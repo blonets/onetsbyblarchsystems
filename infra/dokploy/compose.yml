@@ -123,6 +123,9 @@ services:
       API_BASE_URL: http://api:${API_PORT:-3001}
       # Same shared internal key as the api service (x-internal-key).
       INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY}
+      BACKUP_KMS_KEY: ${BACKUP_KMS_KEY:-}
+      ALLOW_HUB_MUTATIONS: ${ALLOW_HUB_MUTATIONS:-1}
       SSTP_HUB_HOST: ${SSTP_HUB_HOST}
       SSTP_HUB_API_PORT: ${SSTP_HUB_API_PORT:-8728}
       WORKER_SHARD_INDEX: ${WORKER_SHARD_INDEX:-0}
@@ -136,6 +139,8 @@ services:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.onetsbyblarch.online}
     restart: unless-stopped
     depends_on:
       api:
@@ -144,6 +149,7 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
       PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:-}
       PORT: 3000
+      HOSTNAME: 0.0.0.0
     ports:
       # Host port 3002: 3000 is already allocated on the Dokploy host by
       # another app. Dokploy/Traefik routes the domain to container port 3000

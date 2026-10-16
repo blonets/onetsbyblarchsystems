@@ -11,6 +11,21 @@ function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+/** Parse JWT_EXPIRES_IN whether set as seconds ("3600") or duration ("15m", "1h", "7d"). */
+export function parseJwtExpiresInSeconds(raw: unknown): number {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return raw;
+  if (typeof raw === 'string') {
+    const m = /^(\d+)\s*([smhd])?$/i.exec(raw.trim());
+    if (m) {
+      const n = Number(m[1]);
+      const unit = (m[2] ?? 's').toLowerCase();
+      const mult = unit === 'm' ? 60 : unit === 'h' ? 3600 : unit === 'd' ? 86400 : 1;
+      if (n > 0) return n * mult;
+    }
+  }
+  return 3600;
+}
+
 /**
  * Authentication: credential validation (bcrypt), JWT access tokens and
  * rotating opaque refresh tokens.
@@ -87,7 +102,7 @@ export class AuthService {
     return Math.max(0, ...roles.map((r) => ROLE_RANK[r as RoleName] ?? 0));
   }
 
-  private async issueTokenPair(user: User): Promise<AuthTokens> {
+  private async issueTokenPair(user: User): Promise<AuthTokens & { expiresAt: string }> {
     const role = user.role ?? 'viewer';
     const accessToken = this.jwt.sign({ sub: user.id, email: user.email, role, roles: [role] });
     const refreshToken = randomBytes(48).toString('base64url');
@@ -96,7 +111,8 @@ export class AuthService {
       tokenHash: sha256Hex(refreshToken),
       expiresAt: new Date(Date.now() + this.refreshTtlMs()),
     });
-    const expiresIn = Number(this.config.get('JWT_EXPIRES_IN') ?? 3600);
-    return { accessToken, refreshToken, expiresIn };
+    const expiresIn = parseJwtExpiresInSeconds(this.config.get('JWT_EXPIRES_IN'));
+    const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+    return { accessToken, refreshToken, expiresIn, expiresAt };
   }
 }

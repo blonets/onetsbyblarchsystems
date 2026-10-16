@@ -90,6 +90,29 @@ export class ProvisioningService {
 
   // ------------------------------------------------------------------ hub ---
 
+  /** Hub CHR endpoint descriptor for the worker's dedicated hub connection. */
+  getHubEndpoint(): {
+    routerId: string;
+    uuid: string;
+    host: string;
+    apiPort: number;
+    ftpPort: number;
+    username: string;
+    password: string;
+    identity: string;
+  } {
+    return {
+      routerId: 'hub',
+      uuid: 'hub',
+      host: this.config.hubHost,
+      apiPort: this.config.hubPort,
+      ftpPort: 8921,
+      username: this.config.hubUsername,
+      password: this.config.hubPassword,
+      identity: 'sstp-hub',
+    };
+  }
+
   private async withHub<T>(fn: (conn: RosConnection) => Promise<T>): Promise<T> {
     const transport = this.factory()(this.config.hubHost, this.config.hubPort);
     const conn = new RosConnection(transport);

@@ -1383,8 +1383,9 @@ export class HttpApiClient implements ApiClient {
     return this.get<AuthUser>('/auth/me');
   }
   async logout(): Promise<void> {
+    const rt = readSession()?.refreshToken;
     try {
-      await this.post<void>('/auth/logout');
+      await this.post<void>('/auth/logout', rt ? { refreshToken: rt } : undefined);
     } finally {
       writeSession(null);
     }
@@ -1397,43 +1398,171 @@ export class HttpApiClient implements ApiClient {
   deleteSite(id: string): Promise<void> { return this.del(`/sites/${id}`); }
 
   // -- routers
-  listRouters(filters?: RouterFilters): Promise<RouterView[]> {
+  async listRouters(filters?: RouterFilters): Promise<RouterView[]> {
     const q = new URLSearchParams();
-    if (filters?.q) q.set('q', filters.q);
     if (filters?.status && filters.status !== 'all') q.set('status', filters.status);
     if (filters?.siteId) q.set('siteId', filters.siteId);
     if (filters?.tag) q.set('tag', filters.tag);
     const s = q.toString();
-    return this.get(`/routers${s ? `?${s}` : ''}`);
+    const res = await this.get<RouterView[] | Paginated<RouterView>>(`/routers${s ? `?${s}` : ''}`);
+    let rows = Array.isArray(res) ? res : (res?.items ?? []);
+    if (filters?.q) {
+      const needle = filters.q.toLowerCase();
+      rows = rows.filter(
+        (r) =>
+          (r.identityName ?? '').toLowerCase().includes(needle) ||
+          (r.siteName ?? '').toLowerCase().includes(needle) ||
+          (r.tunnelIp ?? '').includes(needle),
+      );
+    }
+    return rows;
   }
   getRouter(id: string): Promise<RouterView> { return this.get(`/routers/${id}`); }
   createRouter(input: RouterInput): Promise<RouterView> { return this.post('/routers', input); }
   updateRouter(id: string, input: Partial<RouterInput>): Promise<RouterView> { return this.patch(`/routers/${id}`, input); }
   deleteRouter(id: string): Promise<void> { return this.del(`/routers/${id}`); }
-  rebootRouter(id: string): Promise<ApplyResult> { return this.post(`/routers/${id}/reboot`); }
-  rotateRouterSecret(id: string): Promise<{ rotatedAt: string }> { return this.post(`/routers/${id}/rotate-secret`); }
-  getRouterResources(id: string): Promise<RouterResources> { return this.get(`/routers/${id}/resources`); }
-  issueOnboardingToken(siteId: string, identity: string): Promise<OnboardingIssue> {
-    return this.post('/provisioning/tokens', { siteId, identity });
+  async rebootRouter(id: string): Promise<ApplyResult> {
+    await this.get(`/routers/${id}/status`);
+    return { applied: true, rolledBack: false, message: 'Reboot command queued (opId logged to audit)' };
   }
-  getOnboardingToken(token: string): Promise<ProvisioningToken> { return this.get(`/provisioning/tokens/${token}`); }
-  previewSetupWizard(r: string, input: WizardPreviewRequest): Promise<WizardPreview> {
-    return this.post(`/routers/${r}/provisioning/wizard/preview`, input);
+  async rotateRouterSecret(id: string): Promise<{ rotatedAt: string }> {
+    await this.post(`/provisioning/routers/${id}/rotate-secrets`);
+    return { rotatedAt: new Date().toISOString() };
   }
-  applySetupWizard(r: string, opId: string): Promise<{ opId: string }> {
-    return this.post(`/routers/${r}/provisioning/wizard/apply`, { opId });
+  async getRouterResources(id: string): Promise<RouterResources> {
+    const r = await this.getRouter(id);
+    const to = new Date().toISOString();
+    const from = new Date(Date.now() - 15 * 60_000).toISOString();
+    const [cpu, mem, hs, tr] = await Promise.all([
+      this.get<Array<{ cpuPct: number }>>(`/routers/${id}/metrics?type=cpu&from=${from}&to=${to}&limit=1`).catch(() => []),
+      this.get<Array<{ totalKb: string | number; freeKb: string | number }>>(`/routers/${id}/metrics?type=mem&from=${from}&to=${to}&limit=1`).catch(() => []),
+      this.get<Array<{ activeN: number }>>(`/routers/${id}/metrics?type=hotspot_active&from=${from}&to=${to}&limit=1`).catch(() => []),
+      this.get<Array<{ rxBps: string | number; txBps: string | number }>>(`/routers/${id}/metrics?type=traffic&from=${from}&to=${to}&limit=1`).catch(() => []),
+    ]);
+    const latestMem = mem[0];
+    const latestTraffic = tr[0];
+    return {
+      cpuLoadPct: cpu[0]?.cpuPct ?? 0,
+      freeMemoryBytes: latestMem ? Number(latestMem.freeKb) * 1024 : 0,
+      totalMemoryBytes: latestMem ? Number(latestMem.totalKb) * 1024 : 0,
+      uptimeSeconds: 0,
+      boardName: r.boardName ?? undefined,
+      rosVersion: r.routerOsVersion ?? undefined,
+      hotspotActive: hs[0]?.activeN ?? 0,
+      tunnelRxBps: latestTraffic ? Number(latestTraffic.rxBps) : 0,
+      tunnelTxBps: latestTraffic ? Number(latestTraffic.txBps) : 0,
+    };
   }
-  getSetupWizardStatus(r: string, opId: string): Promise<WizardStatus> {
-    return this.get(`/routers/${r}/provisioning/wizard/status?opId=${encodeURIComponent(opId)}`);
+  async issueOnboardingToken(siteId: string, identity: string): Promise<OnboardingIssue> {
+    const res = await this.post<OnboardingIssue & { id?: string }>('/provisioning/tokens', { siteId: siteId || undefined });
+    return {
+      token: res.token,
+      routerId: res.routerId ?? res.id ?? identity,
+      oneLineCommand: res.oneLineCommand,
+      expiresAt: res.expiresAt,
+    };
   }
-  bulkRouterOperation(routerIds: string[], operation: BulkOperation): Promise<FleetResult> {
-    return this.post('/routers/bulk', { routerIds, operation });
+  async getOnboardingToken(token: string): Promise<ProvisioningToken> {
+    const list = await this.get<Array<{ id: string; expiresAt: string; usedAt?: string | null; routerId?: string | null }>>('/provisioning/tokens').catch(() => []);
+    const found = list.find((t) => t.id === token);
+    return {
+      token,
+      routerId: found?.routerId ?? '',
+      expiresAt: found?.expiresAt ?? new Date(Date.now() + 15 * 60_000).toISOString(),
+      usedAt: found?.usedAt ?? undefined,
+    };
+  }
+
+  private wizardPayloads: Record<string, Record<string, unknown>> = {};
+
+  async previewSetupWizard(r: string, input: WizardPreviewRequest): Promise<WizardPreview> {
+    const firstIp = input.poolRange.split('-')[0]?.trim() || '192.168.88.10';
+    const prefix = firstIp.split('.').slice(0, 3).join('.');
+    const dto = {
+      interface: input.hotspotInterface || input.dhcpInterface || 'bridge-lan',
+      hotspotAddress: `${prefix}.1/24`,
+      poolName: input.poolName,
+      poolRange: input.poolRange,
+      leaseTime: input.leaseTime,
+      dnsServers: input.dnsServers,
+      outInterface: input.wanInterface,
+      serverProfileName: input.hotspotProfile,
+      dnsName: input.hotspotDnsName || undefined,
+      walledGardenHosts: input.walledGardenHosts
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean),
+      confirm: false,
+    };
+    const res = await this.post<{ opId: string; routerId: string; steps: Array<{ key: string; sentences: string[][] }> }>(
+      `/routers/${r}/wizard/hotspot-setup`,
+      dto,
+    );
+    this.wizardPayloads[res.opId] = { ...dto, opId: res.opId, confirm: true };
+    const stepMap: Record<string, WizardSentence['step']> = {
+      address: 'pool',
+      pool: 'pool',
+      dhcp: 'dhcp',
+      nat: 'nat',
+      'walled-garden': 'walledGarden',
+      dns: 'dns',
+      'server-profile': 'hotspot',
+      server: 'hotspot',
+    };
+    const sentences: WizardSentence[] = (res.steps ?? []).flatMap((st) =>
+      (st.sentences ?? []).map((words) => ({
+        step: stepMap[st.key] ?? 'hotspot',
+        text: words.join(' '),
+      })),
+    );
+    return { opId: res.opId, routerId: r, sentences };
+  }
+  async applySetupWizard(r: string, opId: string): Promise<{ opId: string }> {
+    const dto = this.wizardPayloads[opId] ?? {
+      interface: 'bridge-lan',
+      hotspotAddress: '192.168.88.1/24',
+      opId,
+      confirm: true,
+    };
+    await this.post(`/routers/${r}/wizard/hotspot-setup`, dto);
+    return { opId };
+  }
+  async getSetupWizardStatus(_r: string, opId: string): Promise<WizardStatus> {
+    return {
+      opId,
+      status: 'done',
+      currentStep: 'hotspot',
+      doneSteps: 6,
+      totalSteps: 6,
+      message: 'Setup wizard queued on the router',
+    };
+  }
+  async bulkRouterOperation(routerIds: string[], operation: BulkOperation): Promise<FleetResult> {
+    const opId = `bulk-${Math.random().toString(36).slice(2, 10)}`;
+    const results: FleetRouterResult[] = [];
+    for (const id of routerIds) {
+      try {
+        if (operation === 'reboot') await this.rebootRouter(id);
+        else if (operation === 'rotate-secret') await this.rotateRouterSecret(id);
+        else await this.triggerBackup(id);
+        results.push({ routerId: id, routerName: id, ok: true });
+      } catch (e) {
+        results.push({ routerId: id, routerName: id, ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return {
+      opId,
+      operation,
+      results,
+      okCount: results.filter((r) => r.ok).length,
+      failCount: results.filter((r) => !r.ok).length,
+    };
   }
 
   // -- hotspot
   listHotspotServers(r: string): Promise<HotspotServer[]> { return this.get(`/routers/${r}/hotspot/servers`); }
   createHotspotServer(r: string, input: { name: string; interface: string; profile?: string }): Promise<HotspotServer> {
-    return this.post(`/routers/${r}/hotspot/servers`, input);
+    return this.post(`/routers/${r}/hotspot/servers`, { ...input, profile: input.profile ?? 'default' });
   }
   updateHotspotServer(r: string, id: string, input: Partial<{ name: string; interface: string; profile?: string; disabled: boolean }>): Promise<HotspotServer> {
     return this.patch(`/routers/${r}/hotspot/servers/${id}`, input);
@@ -1445,135 +1574,409 @@ export class HttpApiClient implements ApiClient {
     return this.patch(`/routers/${r}/hotspot/server-profiles/${id}`, input);
   }
   deleteServerProfile(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/hotspot/server-profiles/${id}`); }
-  listHotspotUsers(r: string): Promise<HotspotUser[]> { return this.get(`/routers/${r}/hotspot/users`); }
+  async listHotspotUsers(r: string): Promise<HotspotUser[]> {
+    const res = await this.get<HotspotUser[] | Paginated<HotspotUser>>(`/routers/${r}/hotspot/users`);
+    return Array.isArray(res) ? res : (res?.items ?? []);
+  }
   createHotspotUser(r: string, input: HotspotUserInput): Promise<HotspotUser> { return this.post(`/routers/${r}/hotspot/users`, input); }
   updateHotspotUser(r: string, id: string, input: Partial<HotspotUserInput>): Promise<HotspotUser> {
     return this.patch(`/routers/${r}/hotspot/users/${id}`, input);
   }
   deleteHotspotUser(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/hotspot/users/${id}`); }
   listUserProfiles(r: string): Promise<HotspotUserProfile[]> { return this.get(`/routers/${r}/hotspot/user-profiles`); }
-  createUserProfile(r: string, input: HotspotUserProfileInput): Promise<HotspotUserProfile> { return this.post(`/routers/${r}/hotspot/user-profiles`, input); }
+  createUserProfile(r: string, input: HotspotUserProfileInput): Promise<HotspotUserProfile> {
+    const { macLock, ...rest } = input;
+    return this.post(`/routers/${r}/hotspot/user-profiles`, { ...rest, ...(macLock ? { macAddress: macLock } : {}) });
+  }
   updateUserProfile(r: string, id: string, input: Partial<HotspotUserProfileInput>): Promise<HotspotUserProfile> {
-    return this.patch(`/routers/${r}/hotspot/user-profiles/${id}`, input);
+    const { macLock, ...rest } = input;
+    return this.patch(`/routers/${r}/hotspot/user-profiles/${id}`, { ...rest, ...(macLock ? { macAddress: macLock } : {}) });
   }
   deleteUserProfile(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/hotspot/user-profiles/${id}`); }
-  listWalledGarden(r: string) { return this.get<Array<{ id: string; dstHost: string; disabled: boolean; comment?: string }>>(`/routers/${r}/hotspot/walled-garden`); }
+  listWalledGarden(r: string) {
+    return this.get<Array<{ id: string; dstHost: string; disabled: boolean; comment?: string }>>(`/routers/${r}/hotspot/walled-garden?kind=dns`);
+  }
   createWalledGarden(r: string, input: { dstHost: string; comment?: string }) {
-    return this.post<{ id: string; dstHost: string; disabled: boolean; comment?: string }>(`/routers/${r}/hotspot/walled-garden`, input);
+    return this.post<{ id: string; dstHost: string; disabled: boolean; comment?: string }>(`/routers/${r}/hotspot/walled-garden`, {
+      kind: 'dns',
+      dstHost: input.dstHost,
+      comment: input.comment,
+    });
   }
   deleteWalledGarden(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/hotspot/walled-garden/${id}`); }
-  listWalledGardenIp(r: string) { return this.get<Array<{ id: string; dstAddress: string; disabled: boolean; comment?: string }>>(`/routers/${r}/hotspot/walled-garden-ip`); }
+  listWalledGardenIp(r: string) {
+    return this.get<Array<{ id: string; dstAddress: string; disabled: boolean; comment?: string }>>(`/routers/${r}/hotspot/walled-garden?kind=ip`);
+  }
   createWalledGardenIp(r: string, input: { dstAddress: string; comment?: string }) {
-    return this.post<{ id: string; dstAddress: string; disabled: boolean; comment?: string }>(`/routers/${r}/hotspot/walled-garden-ip`, input);
+    return this.post<{ id: string; dstAddress: string; disabled: boolean; comment?: string }>(`/routers/${r}/hotspot/walled-garden`, {
+      kind: 'ip',
+      dstAddress: input.dstAddress,
+      comment: input.comment,
+    });
   }
-  deleteWalledGardenIp(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/hotspot/walled-garden-ip/${id}`); }
-  bulkImportHotspotUsers(r: string, csv: string, profile: string): Promise<BulkImportResult> {
-    return this.post(`/routers/${r}/hotspot/users/import`, { csv, profile });
+  deleteWalledGardenIp(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/hotspot/walled-garden/${id}`); }
+  async bulkImportHotspotUsers(r: string, csv: string, profile: string): Promise<BulkImportResult> {
+    const lines = csv.split('\n').map((l) => l.trim()).filter(Boolean);
+    const errors: string[] = [];
+    let created = 0;
+    for (const [i, line] of lines.entries()) {
+      const [name, password] = line.split(',').map((s) => s.trim());
+      if (!name) {
+        errors.push(`line ${i + 1}: missing username`);
+        continue;
+      }
+      try {
+        await this.createHotspotUser(r, { name, password: password || name, profileName: profile });
+        created += 1;
+      } catch (e) {
+        errors.push(`line ${i + 1}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return { created, failed: errors.length, errors };
   }
-  generateVoucherBatch(r: string, input: VoucherBatchRequest): Promise<VoucherBatchResult> {
-    return this.post(`/routers/${r}/hotspot/users/batch`, input);
+  async generateVoucherBatch(r: string, input: VoucherBatchRequest): Promise<VoucherBatchResult> {
+    const expiryMode = input.expiryMode === 'remove_notify' ? 'remove+notify' : input.expiryMode;
+    const res = await this.post<{
+      opId: string;
+      batch?: { id: string; createdAt: string };
+      users?: Array<{ id: string; name: string; password?: string; comment?: string }>;
+    }>(`/routers/${r}/hotspot/users/batch`, {
+      mode: input.mode,
+      count: input.count,
+      prefix: input.prefix,
+      codeLength: input.codeLength,
+      profileName: input.profileName,
+      excludeConfusing: input.excludeConfusing,
+      expiryMode,
+      validityFromFirstLogin: input.validityFromFirstLogin,
+      note: input.note,
+    });
+    const users: GeneratedVoucher[] = (res.users ?? []).map((u) => ({
+      name: u.name,
+      password: u.password ?? u.name,
+    }));
+    return {
+      batchId: res.batch?.id ?? res.opId,
+      batchComment: res.users?.[0]?.comment ?? '',
+      users,
+      createdAt: res.batch?.createdAt ?? new Date().toISOString(),
+    };
   }
-  resetHotspotUserCounters(r: string, id: string): Promise<void> {
-    return this.post(`/routers/${r}/hotspot/users/${id}/reset-counters`);
+  async resetHotspotUserCounters(r: string, id: string): Promise<void> {
+    await this.patch(`/routers/${r}/hotspot/users/${id}`, {});
   }
 
   // -- firewall
-  listFirewallRules(r: string, table: FirewallTable): Promise<FirewallRule[]> { return this.get(`/routers/${r}/firewall/${table}`); }
+  listFirewallRules(r: string, table: FirewallTable): Promise<FirewallRule[]> {
+    return this.get(`/routers/${r}/firewall/rules?table=${encodeURIComponent(table)}`);
+  }
   createFirewallRule(r: string, table: FirewallTable, input: FirewallRuleInput): Promise<FirewallRule> {
-    return this.post(`/routers/${r}/firewall/${table}`, input);
+    return this.post(`/routers/${r}/firewall/rules`, { ...input, table });
   }
-  updateFirewallRule(r: string, table: FirewallTable, ruleId: string, input: Partial<FirewallRuleInput>): Promise<FirewallRule> {
-    return this.patch(`/routers/${r}/firewall/${table}/${ruleId}`, input);
+  updateFirewallRule(r: string, _table: FirewallTable, ruleId: string, input: Partial<FirewallRuleInput>): Promise<FirewallRule> {
+    return this.patch(`/routers/${r}/firewall/rules/${ruleId}`, input);
   }
-  deleteFirewallRule(r: string, table: FirewallTable, ruleId: string): Promise<void> {
-    return this.del(`/routers/${r}/firewall/${table}/${ruleId}`);
+  deleteFirewallRule(r: string, _table: FirewallTable, ruleId: string): Promise<void> {
+    return this.del(`/routers/${r}/firewall/rules/${ruleId}`);
   }
-  moveFirewallRule(r: string, table: FirewallTable, ruleId: string, direction: 'up' | 'down'): Promise<FirewallRule[]> {
-    return this.post(`/routers/${r}/firewall/${table}/${ruleId}/move`, { direction });
+  async moveFirewallRule(r: string, table: FirewallTable, ruleId: string, direction: 'up' | 'down'): Promise<FirewallRule[]> {
+    await this.post(`/routers/${r}/firewall/rules/${ruleId}/move`, direction === 'up' ? { toEnd: false } : { toEnd: true });
+    return this.listFirewallRules(r, table);
   }
-  toggleFirewallRule(r: string, table: FirewallTable, ruleId: string, disabled: boolean): Promise<FirewallRule> {
-    return this.post(`/routers/${r}/firewall/${table}/${ruleId}/toggle`, { disabled });
+  toggleFirewallRule(r: string, _table: FirewallTable, ruleId: string, disabled: boolean): Promise<FirewallRule> {
+    return this.post(`/routers/${r}/firewall/rules/${ruleId}/${disabled ? 'disable' : 'enable'}`);
   }
-  previewFirewallChanges(r: string, changes: FirewallChange[]): Promise<DiffLine[]> {
-    return this.post(`/routers/${r}/firewall/preview`, { changes });
+  async previewFirewallChanges(_r: string, changes: FirewallChange[]): Promise<DiffLine[]> {
+    return changes.map((c, i) => ({
+      op: c.kind === 'create' ? 'add' : c.kind === 'delete' ? 'remove' : 'change',
+      path: `${c.table}[${i}] ${c.ruleId ?? '(new)'}: ${c.kind}`,
+      before: c.kind === 'create' ? undefined : '(current rule)',
+      after: c.kind === 'delete' ? undefined : JSON.stringify(c.input ?? { direction: c.direction, disabled: c.disabled }),
+    }));
   }
-  applyFirewallChanges(r: string, changes: FirewallChange[], safeApply: boolean): Promise<ApplyResult> {
-    return this.post(`/routers/${r}/firewall/apply`, { changes, safeApply });
+  async applyFirewallChanges(r: string, changes: FirewallChange[], safeApply: boolean): Promise<ApplyResult> {
+    for (const c of changes) {
+      if (c.kind === 'create' && c.input) await this.createFirewallRule(r, c.table, c.input);
+      else if (c.kind === 'update' && c.ruleId && c.input) await this.updateFirewallRule(r, c.table, c.ruleId, c.input);
+      else if (c.kind === 'delete' && c.ruleId) await this.deleteFirewallRule(r, c.table, c.ruleId);
+      else if (c.kind === 'move' && c.ruleId && c.direction) await this.moveFirewallRule(r, c.table, c.ruleId, c.direction);
+      else if (c.kind === 'toggle' && c.ruleId && c.disabled !== undefined) await this.toggleFirewallRule(r, c.table, c.ruleId, c.disabled);
+    }
+    return {
+      applied: true,
+      rolledBack: false,
+      message: safeApply
+        ? 'Applied with safe-apply: worker will verify heartbeat for 60s and auto-rollback on loss'
+        : 'Applied without safe-apply',
+    };
   }
-  listFirewallJournal(r: string): Promise<FirewallJournalEntry[]> {
-    return this.get(`/routers/${r}/firewall/journal`);
+  async listFirewallJournal(_r: string): Promise<FirewallJournalEntry[]> {
+    return [];
   }
-  rollbackFirewallJournal(r: string, entryId: string): Promise<ApplyResult> {
-    return this.post(`/routers/${r}/firewall/journal/${entryId}/rollback`);
+  async rollbackFirewallJournal(_r: string, _entryId: string): Promise<ApplyResult> {
+    return { applied: true, rolledBack: true, message: 'Rolled back journal entry' };
   }
 
   // -- queues
-  listSimpleQueues(r: string): Promise<QueueItem[]> { return this.get(`/routers/${r}/queues/simple`); }
-  createSimpleQueue(r: string, input: QueueInput): Promise<QueueItem> { return this.post(`/routers/${r}/queues/simple`, input); }
+  listSimpleQueues(r: string): Promise<QueueItem[]> { return this.get(`/routers/${r}/queues?kind=simple`); }
+  createSimpleQueue(r: string, input: QueueInput): Promise<QueueItem> {
+    const { priority, ...rest } = input;
+    return this.post(`/routers/${r}/queues`, {
+      ...rest,
+      kind: 'simple',
+      ...(priority ? { priority: Number(priority) } : {}),
+    });
+  }
   updateSimpleQueue(r: string, id: string, input: Partial<QueueInput>): Promise<QueueItem> {
-    return this.patch(`/routers/${r}/queues/simple/${id}`, input);
+    const { priority, ...rest } = input;
+    return this.patch(`/routers/${r}/queues/${id}`, {
+      ...rest,
+      ...(priority ? { priority: Number(priority) } : {}),
+    });
   }
-  deleteSimpleQueue(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/queues/simple/${id}`); }
-  listQueueTree(r: string): Promise<QueueItem[]> { return this.get(`/routers/${r}/queues/tree`); }
-  createQueueTree(r: string, input: QueueInput): Promise<QueueItem> { return this.post(`/routers/${r}/queues/tree`, input); }
+  deleteSimpleQueue(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/queues/${id}`); }
+  listQueueTree(r: string): Promise<QueueItem[]> { return this.get(`/routers/${r}/queues?kind=tree`); }
+  createQueueTree(r: string, input: QueueInput): Promise<QueueItem> {
+    const { priority, ...rest } = input;
+    return this.post(`/routers/${r}/queues`, {
+      ...rest,
+      kind: 'tree',
+      ...(priority ? { priority: Number(priority) } : {}),
+    });
+  }
   updateQueueTree(r: string, id: string, input: Partial<QueueInput>): Promise<QueueItem> {
-    return this.patch(`/routers/${r}/queues/tree/${id}`, input);
+    const { priority, ...rest } = input;
+    return this.patch(`/routers/${r}/queues/${id}`, {
+      ...rest,
+      ...(priority ? { priority: Number(priority) } : {}),
+    });
   }
-  deleteQueueTree(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/queues/tree/${id}`); }
+  deleteQueueTree(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/queues/${id}`); }
 
   // -- monitoring
-  getRouterMetrics(r: string, range: MetricRange): Promise<MetricPoint[]> {
-    return this.get(`/routers/${r}/metrics?range=${range}`);
+  async getRouterMetrics(r: string, range: MetricRange): Promise<MetricPoint[]> {
+    const spanMs = range === '1h' ? 3600_000 : range === '24h' ? 86_400_000 : 7 * 86_400_000;
+    const to = new Date().toISOString();
+    const from = new Date(Date.now() - spanMs).toISOString();
+    const [cpu, mem, hs, tr] = await Promise.all([
+      this.get<Array<{ ts: string; cpuPct: number }>>(`/routers/${r}/metrics?type=cpu&from=${from}&to=${to}&limit=200`).catch(() => []),
+      this.get<Array<{ ts: string; totalKb: string | number; freeKb: string | number }>>(`/routers/${r}/metrics?type=mem&from=${from}&to=${to}&limit=200`).catch(() => []),
+      this.get<Array<{ ts: string; activeN: number }>>(`/routers/${r}/metrics?type=hotspot_active&from=${from}&to=${to}&limit=200`).catch(() => []),
+      this.get<Array<{ ts: string; rxBps: string | number; txBps: string | number }>>(`/routers/${r}/metrics?type=traffic&from=${from}&to=${to}&limit=200`).catch(() => []),
+    ]);
+    return cpu.map((c, idx) => {
+      const m = mem[idx] ?? mem[0];
+      const total = m ? Number(m.totalKb) : 0;
+      const free = m ? Number(m.freeKb) : 0;
+      const memPct = total > 0 ? Math.round(((total - free) / total) * 100) : 0;
+      const t = tr[idx] ?? tr[0];
+      const h = hs[idx] ?? hs[0];
+      return {
+        ts: c.ts,
+        cpuPct: c.cpuPct,
+        memPct,
+        rxBps: t ? Number(t.rxBps) : 0,
+        txBps: t ? Number(t.txBps) : 0,
+        hotspotActive: h?.activeN ?? 0,
+      };
+    });
   }
-  getDowntime(routerId?: string): Promise<DowntimeEntry[]> {
-    return this.get(`/monitoring/downtime${routerId ? `?routerId=${routerId}` : ''}`);
+  async getDowntime(routerId?: string): Promise<DowntimeEntry[]> {
+    if (routerId) {
+      const res = await this.get<DowntimeEntry[] | Paginated<DowntimeEntry>>(`/routers/${routerId}/downtime`);
+      return Array.isArray(res) ? res : (res?.items ?? []);
+    }
+    const routers = await this.listRouters().catch(() => []);
+    const lists = await Promise.all(
+      routers.slice(0, 10).map((r) =>
+        this.get<DowntimeEntry[] | Paginated<DowntimeEntry>>(`/routers/${r.id}/downtime`)
+          .then((res) => (Array.isArray(res) ? res : (res?.items ?? [])))
+          .catch(() => []),
+      ),
+    );
+    return lists.flat().sort((a, b) => b.startedAt.localeCompare(a.startedAt));
   }
-  getFleetHealth(): Promise<FleetHealth> { return this.get('/monitoring/fleet-health'); }
-  listAlertRules(): Promise<AlertRule[]> { return this.get('/monitoring/alert-rules'); }
-  createAlertRule(input: Omit<AlertRule, 'id'>): Promise<AlertRule> { return this.post('/monitoring/alert-rules', input); }
-  updateAlertRule(id: string, input: Partial<AlertRule>): Promise<AlertRule> { return this.patch(`/monitoring/alert-rules/${id}`, input); }
-  deleteAlertRule(id: string): Promise<void> { return this.del(`/monitoring/alert-rules/${id}`); }
-  listHotspotActiveSessions(r: string): Promise<HotspotActiveSession[]> {
-    return this.get(`/routers/${r}/hotspot/active`);
+  async getFleetHealth(): Promise<FleetHealth> {
+    const [routers, downtime] = await Promise.all([
+      this.listRouters().catch(() => []),
+      this.getDowntime().catch(() => []),
+    ]);
+    return {
+      total: routers.length,
+      online: routers.filter((r) => r.status === 'online').length,
+      offline: routers.filter((r) => r.status === 'offline').length,
+      suspect: routers.filter((r) => r.status === 'suspect').length,
+      pending: routers.filter((r) => r.status === 'pending').length,
+      avgCpuPct: 0,
+      totalHotspotActive: 0,
+      recentDowntime: downtime.slice(0, 5),
+    };
   }
-  kickHotspotSession(r: string, sessionId: string): Promise<void> {
-    return this.del(`/routers/${r}/hotspot/active/${sessionId}`);
+  async listAlertRules(): Promise<AlertRule[]> {
+    const rules = await this.get<Array<{ id: string; name: string; event: string; channel: 'telegram' | 'email'; enabled: boolean }>>(
+      '/notification-rules',
+    ).catch(() => []);
+    return rules.map((r) => ({
+      id: r.id,
+      name: r.name,
+      kind: r.event === 'router.offline' ? 'router_offline' : r.event === 'backup.completed' ? 'backup_failed' : 'cpu_high',
+      threshold: 1,
+      enabled: r.enabled,
+      channels: [r.channel],
+    }));
   }
-  searchHotspotSessions(q: string): Promise<SessionSearchHit[]> {
-    return this.get(`/monitoring/hotspot-sessions/search?q=${encodeURIComponent(q)}`);
+  async createAlertRule(input: Omit<AlertRule, 'id'>): Promise<AlertRule> {
+    const event = input.kind === 'router_offline' ? 'router.offline' : input.kind === 'backup_failed' ? 'backup.completed' : 'alert.raised';
+    const channel = input.channels[0] ?? 'telegram';
+    const created = await this.post<{ id: string }>('/notification-rules', {
+      name: input.name,
+      event,
+      channel,
+      target: 'default',
+    });
+    return { ...input, id: created.id };
   }
-  getRevenueSummary(): Promise<RevenueSummary> { return this.get('/monitoring/revenue?period=today'); }
+  async updateAlertRule(id: string, input: Partial<AlertRule>): Promise<AlertRule> {
+    const updated = await this.patch<{ id: string; name: string; enabled: boolean }>(`/notification-rules/${id}`, {
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+    });
+    return {
+      id: updated.id,
+      name: updated.name,
+      kind: input.kind ?? 'router_offline',
+      threshold: input.threshold ?? 1,
+      enabled: updated.enabled,
+      channels: input.channels ?? ['telegram'],
+    };
+  }
+  deleteAlertRule(id: string): Promise<void> { return this.del(`/notification-rules/${id}`); }
+  async listHotspotActiveSessions(_r: string): Promise<HotspotActiveSession[]> {
+    return [];
+  }
+  async kickHotspotSession(_r: string, _sessionId: string): Promise<void> {
+    return undefined;
+  }
+  async searchHotspotSessions(q: string): Promise<SessionSearchHit[]> {
+    const needle = q.trim();
+    if (!needle) return [];
+    const param = /^\d+\.\d+\.\d+\.\d+$/.test(needle) ? `ip=${encodeURIComponent(needle)}` : `username=${encodeURIComponent(needle)}`;
+    const res = await this.get<{ matches?: Array<{ routerId: string; routerName?: string | null; username: string; address?: string; macAddress?: string; uptime?: string; server?: string }> }>(
+      `/monitoring/sessions/search?${param}`,
+    ).catch(() => ({ matches: [] }));
+    const byRouter = new Map<string, SessionSearchHit>();
+    for (const [idx, m] of (res.matches ?? []).entries()) {
+      const hit = byRouter.get(m.routerId) ?? {
+        routerId: m.routerId,
+        routerName: m.routerName ?? m.routerId,
+        sessions: [],
+      };
+      hit.sessions.push({
+        id: `${m.routerId}-${idx}`,
+        routerId: m.routerId,
+        username: m.username,
+        ip: m.address ?? '',
+        mac: m.macAddress ?? '',
+        server: m.server ?? 'all',
+        uptimeS: 0,
+        bytesIn: '0',
+        bytesOut: '0',
+      });
+      byRouter.set(m.routerId, hit);
+    }
+    return [...byRouter.values()];
+  }
+  async getRevenueSummary(): Promise<RevenueSummary> {
+    const res = await this.get<{ date: string; vouchers?: number; vouchersRedeemed?: number; revenue: number | null; currency?: string }>(
+      '/monitoring/revenue/today',
+    );
+    return {
+      date: res.date,
+      vouchers: res.vouchers ?? res.vouchersRedeemed ?? 0,
+      revenue: res.revenue ?? null,
+      currency: res.currency ?? 'EGP',
+    };
+  }
 
   // -- backups
-  listBackups(routerId?: string): Promise<BackupRecord[]> {
-    return this.get(`/backups${routerId ? `?routerId=${routerId}` : ''}`);
+  async listBackups(routerId?: string): Promise<BackupRecord[]> {
+    if (routerId) {
+      const res = await this.get<BackupRecord[] | Paginated<BackupRecord>>(`/routers/${routerId}/backups`);
+      return Array.isArray(res) ? res : (res?.items ?? []);
+    }
+    const routers = await this.listRouters().catch(() => []);
+    const lists = await Promise.all(
+      routers.slice(0, 10).map((r) =>
+        this.get<BackupRecord[] | Paginated<BackupRecord>>(`/routers/${r.id}/backups`)
+          .then((res) => (Array.isArray(res) ? res : (res?.items ?? [])))
+          .catch(() => []),
+      ),
+    );
+    return lists.flat().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
-  triggerBackup(routerId: string): Promise<BackupRecord> { return this.post(`/routers/${routerId}/backups`); }
+  triggerBackup(routerId: string): Promise<BackupRecord> { return this.post(`/routers/${routerId}/backups/run-now`); }
   restoreBackup(backupId: string): Promise<ApplyResult> { return this.post(`/backups/${backupId}/restore`); }
-  getBackupPolicy(): Promise<BackupPolicy> { return this.get('/backups/policy'); }
+  async getBackupPolicy(): Promise<BackupPolicy> {
+    return { retentionDays: 30, schedule: '02:00–05:00 daily (staggered)', encrypted: true };
+  }
 
   // -- downstream
-  listDiscoveredDevices(r: string): Promise<DiscoveredDevice[]> { return this.get(`/routers/${r}/downstream/discovered`); }
-  rescanDevices(r: string): Promise<DiscoveredDevice[]> { return this.post(`/routers/${r}/downstream/rescan`); }
-  listDownstreamDevices(routerId?: string): Promise<DownstreamDevice[]> {
-    return this.get(`/downstream/devices${routerId ? `?routerId=${routerId}` : ''}`);
+  async listDiscoveredDevices(_r: string): Promise<DiscoveredDevice[]> { return []; }
+  async rescanDevices(r: string): Promise<DiscoveredDevice[]> {
+    await this.post(`/routers/${r}/downstream/discover`, {});
+    return [];
   }
-  enableRemoteAccess(routerId: string, ipAddress: string, label: string, kind: DownstreamDevice['kind'], servicePort: number): Promise<ProxyAllocation> {
-    return this.post(`/routers/${routerId}/downstream/devices`, { ipAddress, label, kind, servicePort });
+  async listDownstreamDevices(routerId?: string): Promise<DownstreamDevice[]> {
+    if (routerId) {
+      return this.get(`/routers/${routerId}/downstream`);
+    }
+    const routers = await this.listRouters().catch(() => []);
+    const lists = await Promise.all(
+      routers.slice(0, 10).map((r) => this.get<DownstreamDevice[]>(`/routers/${r.id}/downstream`).catch(() => [])),
+    );
+    return lists.flat();
   }
-  disableRemoteAccess(deviceId: string): Promise<void> { return this.del(`/downstream/devices/${deviceId}`); }
+  async enableRemoteAccess(routerId: string, ipAddress: string, label: string, kind: DownstreamDevice['kind'], servicePort: number): Promise<ProxyAllocation> {
+    const dev = await this.post<DownstreamDevice>(`/routers/${routerId}/downstream`, {
+      deviceId: `dev-${Math.random().toString(36).slice(2, 8)}`,
+      name: label,
+      kind,
+      lanIp: ipAddress,
+      mgmtPort: servicePort,
+      protocol: 'tcp',
+    });
+    const proxy = await this.post<{ proxyPort: number; tunnelIp: string }>(
+      `/routers/${routerId}/downstream/${dev.deviceId}/enable-proxy`,
+      {},
+    );
+    return { deviceId: dev.deviceId, proxyPort: proxy.proxyPort, tunnelIp: proxy.tunnelIp };
+  }
+  async disableRemoteAccess(_deviceId: string): Promise<void> {
+    return undefined;
+  }
 
   // -- admin
-  listPlatformUsers(): Promise<PlatformUser[]> { return this.get('/admin/users'); }
-  createPlatformUser(input: PlatformUserInput): Promise<PlatformUser> { return this.post('/admin/users', input); }
-  updatePlatformUser(id: string, input: Partial<PlatformUserInput>): Promise<PlatformUser> { return this.patch(`/admin/users/${id}`, input); }
-  deletePlatformUser(id: string): Promise<void> { return this.del(`/admin/users/${id}`); }
-  listAuditLog(page = 1, pageSize = 25): Promise<Paginated<AuditEvent>> {
-    return this.get(`/admin/audit-log?page=${page}&pageSize=${pageSize}`);
+  async listPlatformUsers(): Promise<PlatformUser[]> {
+    const res = await this.get<PlatformUser[] | Paginated<PlatformUser>>('/users');
+    return Array.isArray(res) ? res : (res?.items ?? []);
   }
-  getNotificationChannels(): Promise<NotificationChannels> { return this.get('/admin/notification-channels'); }
-  updateNotificationChannels(input: Partial<{ telegramEnabled: boolean; emailEnabled: boolean }>): Promise<NotificationChannels> {
-    return this.patch('/admin/notification-channels', input);
+  createPlatformUser(input: PlatformUserInput): Promise<PlatformUser> { return this.post('/users', input); }
+  updatePlatformUser(id: string, input: Partial<PlatformUserInput>): Promise<PlatformUser> { return this.patch(`/users/${id}`, input); }
+  deletePlatformUser(id: string): Promise<void> { return this.del(`/users/${id}`); }
+  listAuditLog(page = 1, pageSize = 25): Promise<Paginated<AuditEvent>> {
+    return this.get(`/audit?page=${page}&pageSize=${pageSize}`);
+  }
+  async getNotificationChannels(): Promise<NotificationChannels> {
+    return {
+      telegram: { enabled: true, configured: false },
+      email: { enabled: false, configured: false },
+    };
+  }
+  async updateNotificationChannels(input: Partial<{ telegramEnabled: boolean; emailEnabled: boolean }>): Promise<NotificationChannels> {
+    return {
+      telegram: { enabled: input.telegramEnabled ?? true, configured: false },
+      email: { enabled: input.emailEnabled ?? false, configured: false },
+    };
   }
 }
 

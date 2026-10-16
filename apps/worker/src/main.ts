@@ -49,6 +49,11 @@ import {
 import { createRestoreProcessor } from './jobs/restore.job.js';
 import { createCommandsProcessor, HttpResultReporter } from './jobs/commands.job.js';
 import { createQuotaProcessor } from './jobs/quota.job.js';
+import {
+  createExpirySweepProcessor,
+  HttpHotspotUserDirectory,
+  type HotspotExpirySweepJob,
+} from './jobs/expiry-sweep.job.js';
 import { createProvisionProcessor } from './jobs/provision.job.js';
 import { selectShardRouterIds } from './sharding.js';
 
@@ -86,6 +91,7 @@ async function main(): Promise<void> {
   // remains as a fallback for older deployments.
   const internalKey = process.env.INTERNAL_API_KEY ?? process.env.WORKER_SERVICE_TOKEN ?? '';
   const usePostgres = !!process.env.DATABASE_URL;
+  const hubRouterId = process.env.HUB_ROUTER_ID ?? 'hub';
 
   const registry: RouterRegistry = new HttpRouterRegistry(apiBase, internalKey);
   const manager = new ConnectionManager(makeConnectionFactory(registry));
@@ -103,8 +109,33 @@ async function main(): Promise<void> {
     ? new HttpResultReporter(apiBase, internalKey)
     : undefined;
 
+  const postHeartbeat = async (
+    routerId: string,
+    status: 'online' | 'offline',
+    cause?: string,
+  ): Promise<boolean> => {
+    if (!internalKey) return false;
+    try {
+      const res = await fetch(
+        `${apiBase}/internal/routers/${encodeURIComponent(routerId)}/heartbeat`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-internal-key': internalKey,
+          },
+          body: JSON.stringify(cause ? { status, cause } : { status }),
+        },
+      );
+      return res.ok;
+    } catch (err) {
+      log('heartbeat post failed', err);
+      return false;
+    }
+  };
+
   // Bridge manager status events → canonical bus events on the notify queue
-  // and → the downtime ledger repository.
+  // and → the API heartbeat / downtime ledger repository.
   const notifyQueue = new Queue(QUEUES.notify, { connection });
   const events = new BullMqEventBus(notifyQueue);
   const enrich = async (routerId: string): Promise<{ uuid: string; tunnelIp: string }> => {
@@ -121,7 +152,10 @@ async function main(): Promise<void> {
       await events
         .emit({ event: 'router.online', payload: { routerId: p.routerId, uuid, tunnelIp, at: p.at } })
         .catch((err) => log('notify emit failed', err));
-      await downtime.close(p.routerId, p.at).catch((err) => log('downtime close failed', err));
+      const hbOk = await postHeartbeat(p.routerId, 'online');
+      if (!hbOk) {
+        await downtime.close(p.routerId, p.at).catch((err) => log('downtime close failed', err));
+      }
     })();
   });
   manager.on('router.offline', (p: { routerId: string; at: string; reason?: string }) => {
@@ -133,7 +167,10 @@ async function main(): Promise<void> {
           payload: { routerId: p.routerId, uuid, at: p.at, cause: p.reason },
         })
         .catch((err) => log('notify emit failed', err));
-      await downtime.open(p.routerId, p.at, p.reason).catch((err) => log('downtime open failed', err));
+      const hbOk = await postHeartbeat(p.routerId, 'offline', p.reason);
+      if (!hbOk) {
+        await downtime.open(p.routerId, p.at, p.reason).catch((err) => log('downtime open failed', err));
+      }
     })();
   });
 
@@ -145,7 +182,7 @@ async function main(): Promise<void> {
   const health = new HealthMonitor(manager, listRouterIds);
   health.start();
 
-  // Metrics ingest: canonical batches → metrics-ingest queue for the API.
+  // Metrics ingest: canonical batches → metrics-ingest queue → API /internal/metrics.
   const metricsIngestQueue = new Queue(QUEUES.metricsIngest, { connection });
   const ingest: MetricsIngest = {
     ingest: async (batch) => {
@@ -159,13 +196,49 @@ async function main(): Promise<void> {
   const workers: Worker[] = [];
   const queues: Queue[] = [notifyQueue, metricsIngestQueue];
 
+  if (internalKey) {
+    workers.push(
+      new Worker(
+        QUEUES.metricsIngest,
+        async (job) => {
+          const res = await fetch(`${apiBase}/internal/metrics`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-internal-key': internalKey,
+            },
+            body: JSON.stringify(job.data),
+          });
+          if (!res.ok) {
+            throw new Error(`metrics ingest failed: HTTP ${res.status}`);
+          }
+        },
+        { connection, concurrency: 4 },
+      ),
+    );
+  }
+
   // --- poller (worker-internal queue) ------------------------------------------
-  // One worker dispatches both the poll tick and the quota-tick driver.
+  // One worker dispatches the poll tick, quota-tick, and expiry-sweep-tick.
   const pollProcessor = createPollerProcessor({
     manager,
     listRouterIds,
     ingest,
-    noteActivity: (id) => health.noteActivity(id),
+    noteActivity: (id) => {
+      health.noteActivity(id);
+      void postHeartbeat(id, 'online');
+    },
+    reportSessions: async (routerId, sessions) => {
+      if (!internalKey) return;
+      await fetch(`${apiBase}/internal/monitoring/sessions`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-internal-key': internalKey,
+        },
+        body: JSON.stringify({ routerId, sessions }),
+      }).catch((err) => log('sessions ingest failed', err));
+    },
   });
   const enqueueQuotaTick = async (): Promise<void> => {
     // Registry/API outages are retryable: log and let the next tick retry.
@@ -183,11 +256,32 @@ async function main(): Promise<void> {
       log('quota-tick: router list fetch failed; will retry next tick', err);
     }
   };
+  // v7 never disables expired hotspot users — the sweep enforces expiry
+  // (disable + kick; remove when the user's expiryMode calls for it).
+  const enqueueExpirySweepTick = async (): Promise<void> => {
+    try {
+      for (const routerId of await myRouters()) {
+        const job: HotspotExpirySweepJob = {
+          kind: 'hotspot-expiry-sweep',
+          opId: newOpId(),
+          routerId,
+        };
+        await expiryQueue.add('hotspot-expiry-sweep', job, {
+          jobId: `expiry-sweep-tick-${routerId}`,
+          removeOnComplete: 100,
+          removeOnFail: 200,
+        });
+      }
+    } catch (err) {
+      log('expiry-sweep-tick: router list fetch failed; will retry next tick', err);
+    }
+  };
   workers.push(
     new Worker(
       QUEUES.poll,
       async (job) => {
         if (job.name === 'quota-tick') return enqueueQuotaTick();
+        if (job.name === 'expiry-sweep-tick') return enqueueExpirySweepTick();
         return pollProcessor(job as never);
       },
       { connection, concurrency: 1 },
@@ -224,6 +318,31 @@ async function main(): Promise<void> {
     { every: Number(process.env.QUOTA_INTERVAL_MS ?? 300_000) },
     { name: 'quota-tick', data: {} },
   );
+  // expiry-sweep-tick is driven by the same dispatcher (enqueueExpirySweepTick).
+  await pollQueue.upsertJobScheduler(
+    'expiry-sweep-tick',
+    { every: Number(process.env.EXPIRY_SWEEP_INTERVAL_MS ?? 900_000) },
+    { name: 'expiry-sweep-tick', data: {} },
+  );
+
+  // --- hotspot expiry sweep (v7 never disables expired users; one job per ----
+  // --- owned router every 15 min, worker-internal `expiry` queue) -------------
+  const expiryQueue = new Queue(QUEUES.expiry, { connection });
+  queues.push(expiryQueue);
+  workers.push(
+    new Worker(
+      QUEUES.expiry,
+      createExpirySweepProcessor({
+        manager,
+        users: new HttpHotspotUserDirectory(apiBase, internalKey),
+        audit,
+        events,
+        // Never sweep the hub CHR (or any other guarded id).
+        skipRouterIds: [hubRouterId],
+      }),
+      { connection, concurrency: 4 },
+    ),
+  );
 
   // --- backups ----------------------------------------------------------------------
   const store = new FilesystemObjectStore(process.env.BACKUP_DIR ?? './var/backups');
@@ -232,7 +351,7 @@ async function main(): Promise<void> {
     const ep = await registry.getEndpoint(routerId);
     // FTP uses the same vaulted credentials as the API user; the port comes
     // from the router record (hub CHR: 8921).
-    const ftpPort = Number(process.env[`FTP_PORT_${routerId}`] ?? 21);
+    const ftpPort = Number(process.env[`FTP_PORT_${routerId}`] ?? ep.ftpPort ?? 21);
     return {
       host: ep.host,
       port: ftpPort,
@@ -295,7 +414,6 @@ async function main(): Promise<void> {
   );
 
   // --- provision ----------------------------------------------------------------------
-  const hubRouterId = process.env.HUB_ROUTER_ID ?? 'hub';
   workers.push(
     new Worker(
       QUEUES.provision,
