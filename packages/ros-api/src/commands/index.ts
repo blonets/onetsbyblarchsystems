@@ -3,3 +3,6 @@ export * from './firewall.js';
 export * from './queue.js';
 export * from './system.js';
 export * from './ppp.js';
+export * from './ip.js';
+export * from './interface.js';
+export * from './util.js';

@@ -1,8 +1,45 @@
-import type { HotspotProfile, HotspotServer, HotspotUser } from '@mtk/types';
 import { ReplySentence, replyRows } from '../protocol.js';
 import { idWord, parseYesNo, queryWords, setWords } from './util.js';
 
 /** Typed command builders for `/ip/hotspot/*`. Every builder returns one API sentence. */
+
+// Device-row shapes (what the router returns over the wire). The app layer
+// maps these onto the `@mtk/types` DB entities (which carry routerId,
+// mikrotikId, …) — ros-api never fabricates those fields.
+export interface HotspotUserRow {
+  id: string;
+  server: string;
+  name: string;
+  profile: string;
+  uptime?: string;
+  bytesIn?: number;
+  bytesOut?: number;
+  packetsIn?: number;
+  packetsOut?: number;
+  disabled: boolean;
+  dynamic: boolean;
+  comment?: string;
+}
+
+export interface HotspotProfileRow {
+  id: string;
+  name: string;
+  rateLimit?: string;
+  sessionTimeout?: string;
+  idleTimeout?: string;
+  sharedUsers?: number;
+  transparentProxy?: boolean;
+  comment?: string;
+}
+
+export interface HotspotServerRow {
+  id: string;
+  name: string;
+  interface: string;
+  addressPool?: string;
+  profile?: string;
+  disabled: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // hotspot users
@@ -61,7 +98,7 @@ export const hotspotUserEnable = (id: string): string[] => ['/ip/hotspot/user/en
 
 export const hotspotUserDisable = (id: string): string[] => ['/ip/hotspot/user/disable', idWord(id)];
 
-export function parseHotspotUsers(replies: ReplySentence[]): HotspotUser[] {
+export function parseHotspotUsers(replies: ReplySentence[]): HotspotUserRow[] {
   return replyRows(replies).map((r) => ({
     id: r['.id'] ?? '',
     server: r['server'] ?? '',
@@ -127,7 +164,17 @@ export const hotspotProfileRemove = (id: string): string[] => [
   idWord(id),
 ];
 
-export function parseHotspotProfiles(replies: ReplySentence[]): HotspotProfile[] {
+export const hotspotProfileEnable = (id: string): string[] => [
+  '/ip/hotspot/user/profile/enable',
+  idWord(id),
+];
+
+export const hotspotProfileDisable = (id: string): string[] => [
+  '/ip/hotspot/user/profile/disable',
+  idWord(id),
+];
+
+export function parseHotspotProfiles(replies: ReplySentence[]): HotspotProfileRow[] {
   return replyRows(replies).map((r) => ({
     id: r['.id'] ?? '',
     name: r['name'] ?? '',
@@ -144,9 +191,133 @@ export function parseHotspotProfiles(replies: ReplySentence[]): HotspotProfile[]
 // hotspot servers
 // ---------------------------------------------------------------------------
 
+export interface HotspotServerInput {
+  name: string;
+  /** interface the hotspot listens on */
+  interface: string;
+  addressPool?: string;
+  profile?: string;
+  idleTimeout?: string;
+  keepaliveTimeout?: string;
+  loginBy?: string;
+  comment?: string;
+  disabled?: boolean;
+}
+
+export const hotspotServerAdd = (input: HotspotServerInput): string[] => [
+  '/ip/hotspot/add',
+  ...setWords({
+    name: input.name,
+    interface: input.interface,
+    'address-pool': input.addressPool,
+    profile: input.profile,
+    'idle-timeout': input.idleTimeout,
+    'keepalive-timeout': input.keepaliveTimeout,
+    'login-by': input.loginBy,
+    comment: input.comment,
+    disabled: input.disabled,
+  }),
+];
+
+export const hotspotServerSet = (id: string, patch: Partial<HotspotServerInput>): string[] => [
+  '/ip/hotspot/set',
+  idWord(id),
+  ...setWords({
+    name: patch.name,
+    interface: patch.interface,
+    'address-pool': patch.addressPool,
+    profile: patch.profile,
+    'idle-timeout': patch.idleTimeout,
+    'keepalive-timeout': patch.keepaliveTimeout,
+    'login-by': patch.loginBy,
+    comment: patch.comment,
+    disabled: patch.disabled,
+  }),
+];
+
+export const hotspotServerRemove = (id: string): string[] => ['/ip/hotspot/remove', idWord(id)];
+
+export const hotspotServerEnable = (id: string): string[] => ['/ip/hotspot/enable', idWord(id)];
+
+export const hotspotServerDisable = (id: string): string[] => ['/ip/hotspot/disable', idWord(id)];
+
 export const hotspotServerList = (): string[] => ['/ip/hotspot/print'];
 
-export function parseHotspotServers(replies: ReplySentence[]): HotspotServer[] {
+// ---------------------------------------------------------------------------
+// hotspot server profiles (/ip/hotspot/profile)
+// ---------------------------------------------------------------------------
+
+export interface HotspotServerProfileInput {
+  name: string;
+  hotspotAddress?: string;
+  dnsName?: string;
+  htmlDirectory?: string;
+  loginBy?: string;
+  comment?: string;
+}
+
+export const hotspotServerProfileAdd = (input: HotspotServerProfileInput): string[] => [
+  '/ip/hotspot/profile/add',
+  ...setWords({
+    name: input.name,
+    'hotspot-address': input.hotspotAddress,
+    'dns-name': input.dnsName,
+    'html-directory': input.htmlDirectory,
+    'login-by': input.loginBy,
+    comment: input.comment,
+  }),
+];
+
+export const hotspotServerProfileList = (): string[] => ['/ip/hotspot/profile/print'];
+
+export const hotspotServerProfileSet = (
+  id: string,
+  patch: Partial<HotspotServerProfileInput>,
+): string[] => [
+  '/ip/hotspot/profile/set',
+  idWord(id),
+  ...setWords({
+    name: patch.name,
+    'hotspot-address': patch.hotspotAddress,
+    'dns-name': patch.dnsName,
+    'html-directory': patch.htmlDirectory,
+    'login-by': patch.loginBy,
+    comment: patch.comment,
+  }),
+];
+
+export const hotspotServerProfileRemove = (id: string): string[] => [
+  '/ip/hotspot/profile/remove',
+  idWord(id),
+];
+
+export interface HotspotServerProfile {
+  id: string;
+  name: string;
+  hotspotAddress?: string;
+  dnsName?: string;
+  htmlDirectory?: string;
+  loginBy?: string;
+  comment?: string;
+}
+
+export function parseHotspotServerProfiles(replies: ReplySentence[]): HotspotServerProfile[] {
+  return replyRows(replies).map((r) => ({
+    id: r['.id'] ?? '',
+    name: r['name'] ?? '',
+    hotspotAddress: r['hotspot-address'],
+    dnsName: r['dns-name'],
+    htmlDirectory: r['html-directory'],
+    loginBy: r['login-by'],
+    comment: r['comment'],
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// hotspot servers (print/parse)
+// ---------------------------------------------------------------------------
+
+export function parseHotspotServers(replies: ReplySentence[]): HotspotServerRow[] {
   return replyRows(replies).map((r) => ({
     id: r['.id'] ?? '',
     name: r['name'] ?? '',
@@ -186,10 +357,144 @@ export const walledGardenAdd = (input: WalledGardenInput): string[] => [
 
 export const walledGardenList = (): string[] => ['/ip/hotspot/walled-garden/print'];
 
+export const walledGardenSet = (id: string, patch: Partial<WalledGardenInput>): string[] => [
+  '/ip/hotspot/walled-garden/set',
+  idWord(id),
+  ...setWords({
+    server: patch.server,
+    'dst-host': patch.dstHost,
+    'dst-port': patch.dstPort,
+    protocol: patch.protocol,
+    action: patch.action,
+    comment: patch.comment,
+    disabled: patch.disabled,
+  }),
+];
+
 export const walledGardenRemove = (id: string): string[] => [
   '/ip/hotspot/walled-garden/remove',
   idWord(id),
 ];
+
+export const walledGardenEnable = (id: string): string[] => [
+  '/ip/hotspot/walled-garden/enable',
+  idWord(id),
+];
+
+export const walledGardenDisable = (id: string): string[] => [
+  '/ip/hotspot/walled-garden/disable',
+  idWord(id),
+];
+
+export interface WalledGardenEntry {
+  id: string;
+  server?: string;
+  dstHost?: string;
+  dstPort?: string;
+  protocol?: string;
+  action?: string;
+  comment?: string;
+  disabled: boolean;
+  dynamic: boolean;
+}
+
+export function parseWalledGarden(replies: ReplySentence[]): WalledGardenEntry[] {
+  return replyRows(replies).map((r) => ({
+    id: r['.id'] ?? '',
+    server: r['server'],
+    dstHost: r['dst-host'],
+    dstPort: r['dst-port'],
+    protocol: r['protocol'],
+    action: r['action'],
+    comment: r['comment'],
+    disabled: parseYesNo(r['disabled']),
+    dynamic: parseYesNo(r['dynamic']),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// walled garden ip (/ip/hotspot/walled-garden/ip)
+// ---------------------------------------------------------------------------
+
+export interface WalledGardenIpInput {
+  server?: string;
+  dstAddress?: string;
+  dstPort?: string;
+  protocol?: string;
+  action?: 'allow' | 'deny';
+  comment?: string;
+  disabled?: boolean;
+}
+
+export const walledGardenIpAdd = (input: WalledGardenIpInput): string[] => [
+  '/ip/hotspot/walled-garden/ip/add',
+  ...setWords({
+    server: input.server,
+    'dst-address': input.dstAddress,
+    'dst-port': input.dstPort,
+    protocol: input.protocol,
+    action: input.action,
+    comment: input.comment,
+    disabled: input.disabled,
+  }),
+];
+
+export const walledGardenIpList = (): string[] => ['/ip/hotspot/walled-garden/ip/print'];
+
+export const walledGardenIpSet = (id: string, patch: Partial<WalledGardenIpInput>): string[] => [
+  '/ip/hotspot/walled-garden/ip/set',
+  idWord(id),
+  ...setWords({
+    server: patch.server,
+    'dst-address': patch.dstAddress,
+    'dst-port': patch.dstPort,
+    protocol: patch.protocol,
+    action: patch.action,
+    comment: patch.comment,
+    disabled: patch.disabled,
+  }),
+];
+
+export const walledGardenIpRemove = (id: string): string[] => [
+  '/ip/hotspot/walled-garden/ip/remove',
+  idWord(id),
+];
+
+export const walledGardenIpEnable = (id: string): string[] => [
+  '/ip/hotspot/walled-garden/ip/enable',
+  idWord(id),
+];
+
+export const walledGardenIpDisable = (id: string): string[] => [
+  '/ip/hotspot/walled-garden/ip/disable',
+  idWord(id),
+];
+
+export interface WalledGardenIpEntry {
+  id: string;
+  server?: string;
+  dstAddress?: string;
+  dstPort?: string;
+  protocol?: string;
+  action?: string;
+  comment?: string;
+  disabled: boolean;
+  dynamic: boolean;
+}
+
+export function parseWalledGardenIp(replies: ReplySentence[]): WalledGardenIpEntry[] {
+  return replyRows(replies).map((r) => ({
+    id: r['.id'] ?? '',
+    server: r['server'],
+    dstAddress: r['dst-address'],
+    dstPort: r['dst-port'],
+    protocol: r['protocol'],
+    action: r['action'],
+    comment: r['comment'],
+    disabled: parseYesNo(r['disabled']),
+    dynamic: parseYesNo(r['dynamic']),
+  }));
+}
 
 function num(v: string | undefined): number | undefined {
   if (v === undefined || v === '') return undefined;

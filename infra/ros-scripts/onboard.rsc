@@ -22,9 +22,12 @@
 # =============================================================================
 
 # ============ CHANGE: baked in per router by the PLATFORM (never by hand) ============
+# Hub address comes from the SSTP_HUB_HOST env var — never a hardcoded IP.
+# Canonical: vpn.onetsbyblarch.online
+#   (DNS-based SSTP dialing proven live on 2026-10-16.)
 :local UUID         "CHANGEME"   # CHANGE: platform router UUID
 :local ROUTER_NAME "CHANGEME"   # CHANGE: site/router display name (<=64 chars)
-:local HUB_HOST    "CHANGEME"   # CHANGE: SSTP_HUB_HOST (hub DNS/IP)
+:local HUB_HOST    "CHANGEME"   # CHANGE: SSTP_HUB_HOST (hub DNS name)
 :local SSTP_USER   "CHANGEME"   # CHANGE: per-router PPP username
 :local SSTP_PASS   "CHANGEME"   # CHANGE: per-router PPP password
 :local TUNNEL_IP   "CHANGEME"   # CHANGE: this router's static tunnel IP (10.200.x.y)

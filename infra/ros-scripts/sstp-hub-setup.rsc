@@ -23,7 +23,10 @@
 # =============================================================================
 
 # ------------------------- CHANGE: operator variables -------------------------
-:local HUB_CN "CHANGEME"            # CHANGE: hub DNS name or public IP (cert CN + CRL host)
+# Hub identity comes from DNS — never a hardcoded IP in client configs.
+# Canonical: vpn.onetsbyblarch.online
+#   (DNS-based SSTP dialing proven live on 2026-10-16.)
+:local HUB_CN "CHANGEME"            # CHANGE: hub DNS name (canonical: vpn.onetsbyblarch.online)
 :local TUNNEL_LOCAL "10.200.0.1"    # CHANGE: hub-side tunnel endpoint (inside 10.200.0.0/16)
 :local CA_NAME "sstp-ca"            # CHANGE only if you must (referenced by server cert)
 :local SRV_CERT_NAME "sstp-server"   # CHANGE only if you must (referenced by sstp-server)
