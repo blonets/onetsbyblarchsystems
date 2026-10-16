@@ -72,17 +72,17 @@ describe('ConnectionManager', () => {
     now += 5_000;
     let entries = manager.getDowntime('r1');
     expect(entries).toHaveLength(1);
-    expect(entries[0]!.reconnectedAt).toBeUndefined();
-    expect(entries[0]!.durationMs).toBe(5_000); // running duration
-    expect(entries[0]!.reason).toBe('transport closed');
+    expect(entries[0]!.endedAt).toBeUndefined();
+    expect(entries[0]!.durationS).toBe(5); // running duration
+    expect(entries[0]!.cause).toBe('transport closed');
 
     now += 2_000;
     const conn2 = await manager.ensure('r1'); // reconnects
     expect(conn2.connected).toBe(true);
     entries = manager.getDowntime('r1');
     expect(entries).toHaveLength(1);
-    expect(entries[0]!.reconnectedAt).toBe(new Date(now).toISOString());
-    expect(entries[0]!.durationMs).toBe(7_000);
+    expect(entries[0]!.endedAt).toBe(new Date(now).toISOString());
+    expect(entries[0]!.durationS).toBe(7);
   });
 
   it('does not duplicate an open outage on repeated failure reports', async () => {
