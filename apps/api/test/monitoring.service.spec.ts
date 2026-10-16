@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
+import { AuditService } from '../src/audit/audit.service.js';
 import { InMemoryDatabase } from '../src/db/in-memory-database.js';
 import { InMemoryMetricsStore } from '../src/db/metrics-store.js';
 import { EventsService } from '../src/events/events.module.js';
+import { InMemoryJobs } from '../src/jobs/jobs.module.js';
 import { MonitoringService } from '../src/monitoring/monitoring.service.js';
 import { NullRealtime } from '../src/realtime/realtime.port.js';
+import { RoutersService } from '../src/routers/routers.service.js';
 
 function setup() {
   const db = new InMemoryDatabase();
@@ -11,7 +14,9 @@ function setup() {
   const realtime = new NullRealtime();
   const emitToRouter = vi.spyOn(realtime, 'emitToRouter');
   const events = new EventsService();
-  const svc = new MonitoringService(db, metrics, realtime, events);
+  const config = { get: () => undefined };
+  const routers = new RoutersService(db, new InMemoryJobs(), new AuditService(db));
+  const svc = new MonitoringService(db, metrics, realtime, events, config, routers);
   return { db, metrics, realtime, emitToRouter, events, svc };
 }
 

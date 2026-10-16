@@ -16,6 +16,11 @@ class RouterQuery extends PaginationQuery {
   @IsOptional()
   @IsIn(['pending', 'online', 'offline', 'suspect', 'decommissioned'])
   status?: RouterStatus;
+
+  /** Tag filter — routers carrying this label (see Router.tags). */
+  @IsOptional()
+  @IsString()
+  tag?: string;
 }
 
 @Controller('routers')
@@ -25,7 +30,7 @@ export class RoutersController {
 
   @Get()
   findAll(@Query() q: RouterQuery) {
-    return this.routers.findAll({ page: q.page, pageSize: q.pageSize, siteId: q.siteId, status: q.status });
+    return this.routers.findAll({ page: q.page, pageSize: q.pageSize, siteId: q.siteId, status: q.status, tag: q.tag });
   }
 
   @Get(':id')

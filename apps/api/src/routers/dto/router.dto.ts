@@ -1,4 +1,4 @@
-import { IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsArray, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 
 function PortField() {
   return function (target: object, propertyKey: string): void {
@@ -76,6 +76,12 @@ export class CreateRouterDto {
   @IsOptional()
   @IsString()
   routerOsVersion?: string;
+
+  /** Free-form grouping labels, e.g. ["cairo", "vip"] — for tag-filtered bulk ops. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
 }
 
 export class UpdateRouterDto {
@@ -123,4 +129,10 @@ export class UpdateRouterDto {
   @IsOptional()
   @IsIn(['pending', 'online', 'offline', 'suspect', 'decommissioned'])
   status?: 'pending' | 'online' | 'offline' | 'suspect' | 'decommissioned';
+
+  /** Free-form grouping labels, e.g. ["cairo", "vip"] — for tag-filtered bulk ops. */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
 }

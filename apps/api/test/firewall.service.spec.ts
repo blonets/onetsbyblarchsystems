@@ -3,6 +3,7 @@ import { AuditService } from '../src/audit/audit.service.js';
 import { RouterCommandsService } from '../src/commands/commands.service.js';
 import { InMemoryDatabase } from '../src/db/in-memory-database.js';
 import { EventsService } from '../src/events/events.module.js';
+import { FirewallJournalService } from '../src/firewall/firewall-journal.service.js';
 import { FirewallService } from '../src/firewall/firewall.service.js';
 import { InMemoryJobs } from '../src/jobs/jobs.module.js';
 import { NullRealtime } from '../src/realtime/realtime.port.js';
@@ -11,7 +12,7 @@ function setup() {
   const db = new InMemoryDatabase();
   const jobs = new InMemoryJobs();
   const commands = new RouterCommandsService(db, jobs, new NullRealtime(), new EventsService(), new AuditService(db));
-  const svc = new FirewallService(db, commands);
+  const svc = new FirewallService(db, commands, new FirewallJournalService(db));
   return { db, jobs, svc };
 }
 
