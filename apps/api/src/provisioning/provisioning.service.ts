@@ -202,6 +202,7 @@ export class ProvisioningService {
     sstpUsername: string;
     tunnelIp: string;
     fetchCommand: string;
+    oneLineCommand: string;
   }> {
     let siteSlug = 'site';
     if (input.siteId) {
@@ -259,6 +260,7 @@ export class ProvisioningService {
       sstpUsername: username,
       tunnelIp,
       fetchCommand,
+      oneLineCommand: fetchCommand,
     };
   }
 

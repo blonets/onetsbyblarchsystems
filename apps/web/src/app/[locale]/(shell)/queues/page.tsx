@@ -38,7 +38,7 @@ function QueueTab({
   const F = (k: keyof QueueInput) => ({
     value: (form[k] as string | undefined) ?? '',
     onChange: (e: React.ChangeEvent<HTMLInputElement>) =>
-      setForm((f) => ({ ...f, [k]: e.target.value || undefined })),
+      setForm((f) => ({ ...f, [k]: k === 'name' || k === 'target' ? e.target.value : (e.target.value || undefined) })),
   });
 
   const rows = q.data ?? [];
@@ -106,7 +106,7 @@ function QueueTab({
           <Field label={t('priority')}><Input {...F('priority')} dir="ltr" type="number" min={1} max={8} /></Field>
           {tree && <Field label={t('parent')}><Input {...F('parent')} dir="ltr" placeholder="global" /></Field>}
           <div className="sm:col-span-2">
-            <Button type="submit" disabled={createM.isPending || updateM.isPending}>{tCommon('save')}</Button>
+            <Button type="submit" disabled={createM.isPending || updateM.isPending || !(form.name ?? '').trim() || !(form.target ?? '').trim()}>{tCommon('save')}</Button>
           </div>
         </form>
       </Dialog>

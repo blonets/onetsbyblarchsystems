@@ -1461,11 +1461,11 @@ export class HttpApiClient implements ApiClient {
     };
   }
   async issueOnboardingToken(siteId: string, identity: string): Promise<OnboardingIssue> {
-    const res = await this.post<OnboardingIssue & { id?: string }>('/provisioning/tokens', { siteId: siteId || undefined });
+    const res = await this.post<OnboardingIssue & { id?: string; fetchCommand?: string }>('/provisioning/tokens', { siteId: siteId || undefined });
     return {
       token: res.token,
       routerId: res.routerId ?? res.id ?? identity,
-      oneLineCommand: res.oneLineCommand,
+      oneLineCommand: res.oneLineCommand ?? res.fetchCommand ?? '',
       expiresAt: res.expiresAt,
     };
   }

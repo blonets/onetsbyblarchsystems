@@ -28,14 +28,15 @@ function SiteForm({
   const tCommon = useTranslations('common');
   const [form, setForm] = useState<SiteInput>(initial);
   const set = (k: keyof SiteInput) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-    setForm((f) => ({ ...f, [k]: e.target.value || undefined }));
+    setForm((f) => ({ ...f, [k]: k === 'name' ? e.target.value : (e.target.value || undefined) }));
 
   return (
     <form
       className="flex flex-col gap-4"
       onSubmit={(e) => {
         e.preventDefault();
-        if (form.name.trim()) onSubmit({ ...form, name: form.name.trim() });
+        const trimmed = (form.name ?? '').trim();
+        if (trimmed) onSubmit({ ...form, name: trimmed });
       }}
     >
       <Field label={t('name')}>
@@ -55,7 +56,7 @@ function SiteForm({
       <Field label={t('notes')}>
         <Textarea rows={3} value={form.notes ?? ''} onChange={set('notes')} />
       </Field>
-      <Button type="submit" size="lg" disabled={busy || !form.name.trim()}>
+      <Button type="submit" size="lg" disabled={busy || !(form.name ?? '').trim()}>
         {busy ? '…' : tCommon('save')}
       </Button>
     </form>

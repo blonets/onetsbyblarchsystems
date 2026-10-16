@@ -25,8 +25,8 @@ export class SitesService {
   ) {}
 
   async create(dto: CreateSiteDto, actor?: CurrentUserType): Promise<Site> {
-    const base = dto.slug ?? slugify(dto.name);
-    let slug = base || 'site';
+    const base = (dto.slug ?? slugify(dto.name)) || 'site';
+    let slug = base;
     let n = 0;
     while (await this.db.sites.findUnique({ slug })) {
       n += 1;
