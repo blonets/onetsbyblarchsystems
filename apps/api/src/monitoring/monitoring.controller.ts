@@ -1,5 +1,5 @@
 import { BadRequestException, Body, Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
-import { IsArray, IsIn, IsInt, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
+import { IsArray, IsIn, IsInt, IsNumber, IsOptional, IsString, Max, Min, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 import type { MetricType, MetricsIngestBatch } from '@mtk/types';
 import { Roles } from '../auth/decorators/roles.decorator.js';
@@ -14,22 +14,22 @@ class MetricPointDto {
 
 class CpuDto extends MetricPointDto {
   @IsString() routerId!: string;
-  @Type(() => Number) cpuPct!: number;
+  @IsNumber() @Type(() => Number) cpuPct!: number;
 }
 class MemDto extends MetricPointDto {
   @IsString() routerId!: string;
-  @Type(() => Number) totalKb!: number;
-  @Type(() => Number) freeKb!: number;
+  @IsNumber() @Type(() => Number) totalKb!: number;
+  @IsNumber() @Type(() => Number) freeKb!: number;
 }
 class TrafficDto extends MetricPointDto {
   @IsString() routerId!: string;
   @IsString() iface!: string;
-  @Type(() => Number) rxBps!: number;
-  @Type(() => Number) txBps!: number;
+  @IsNumber() @Type(() => Number) rxBps!: number;
+  @IsNumber() @Type(() => Number) txBps!: number;
 }
 class HotspotActiveDto extends MetricPointDto {
   @IsString() routerId!: string;
-  @Type(() => Number) activeN!: number;
+  @IsNumber() @Type(() => Number) activeN!: number;
 }
 
 class MetricsIngestDto {
