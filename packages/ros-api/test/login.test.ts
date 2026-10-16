@@ -37,7 +37,7 @@ describe('modern login (6.43+/v7)', () => {
   });
 
   it('surfaces wrong-password traps', async () => {
-    const t = new FakeTransport().respondWith(() => [['!trap', '=message=cannot log in']]);
+    const t = new FakeTransport().respondWith(() => [['!trap', '=message=cannot log in'], ['!done']]);
     const conn = new RosConnection(t, { loginMode: 'modern' });
     await conn.connect();
     await expect(conn.login('admin', 'bad')).rejects.toBeInstanceOf(RosTrapError);
@@ -73,7 +73,7 @@ describe('auto login fallback', () => {
     const t = new FakeTransport();
     t.respondWith((sent) => {
       const hasPassword = sent.some((w) => w.startsWith('=password='));
-      if (hasPassword) return [['!trap', '=message=old style login not supported']];
+      if (hasPassword) return [['!trap', '=message=old style login not supported'], ['!done']];
       if (sent.length === 1) return [['!done', `=ret=${KNOWN_CHALLENGE}`]];
       expect(sent).toEqual(['/login', '=name=admin', `=response=${KNOWN_RESPONSE}`]);
       return [['!done']];
@@ -94,5 +94,63 @@ describe('auto login fallback', () => {
     await conn.connect();
     await expect(conn.login('admin', 'pw')).rejects.toThrow('boom');
     expect(t.sent).toHaveLength(1); // no legacy retry
+  });
+
+  it('throws a combined RosLoginError when both flows fail', async () => {
+    const t = new FakeTransport();
+    t.respondWith((sent) => {
+      const hasPassword = sent.some((w) => w.startsWith('=password='));
+      if (hasPassword) return [['!trap', '=message=invalid user name or password'], ['!done']];
+      // legacy challenge also traps (e.g. device refuses the challenge flow)
+      return [['!trap', '=message=login not allowed'], ['!done']];
+    });
+    const conn = new RosConnection(t); // auto
+    await conn.connect();
+    const err = await conn.login('admin', 'wrong').catch((e) => e);
+    expect(err).toBeInstanceOf(RosLoginError);
+    expect(err.message).toContain('modern flow');
+    expect(err.message).toContain('legacy flow');
+  });
+});
+
+/**
+ * REGRESSION (live-verified 2026-10-16 on RouterOS 6.49.17 CHR):
+ * a bare `/login` sentence as the FIRST sentence FAILS on RouterOS 6.43+.
+ * The client must always lead with `/login =name= =password=` and only use
+ * the bare form when falling back to the pre-6.43 challenge flow.
+ */
+describe('regression: bare /login is never sent first', () => {
+  it('auto mode: first sentence is the modern login sentence', async () => {
+    const t = new FakeTransport().respondWith(() => [['!done']]);
+    const conn = new RosConnection(t); // auto
+    await conn.connect();
+    await conn.login('admin', 'pw');
+    expect(t.sent[0]).toEqual(modernLoginSentence('admin', 'pw'));
+    expect(t.sent[0]).not.toEqual(['/login']);
+  });
+
+  it('modern mode: first sentence is the modern login sentence', async () => {
+    const t = new FakeTransport().respondWith(() => [['!done']]);
+    const conn = new RosConnection(t, { loginMode: 'modern' });
+    await conn.connect();
+    await conn.login('admin', 'pw');
+    expect(t.sent).toHaveLength(1);
+    expect(t.sent[0]).toEqual(modernLoginSentence('admin', 'pw'));
+  });
+
+  it('bare /login appears only as the legacy-fallback challenge request', async () => {
+    const t = new FakeTransport();
+    t.respondWith((sent) => {
+      const hasPassword = sent.some((w) => w.startsWith('=password='));
+      if (hasPassword) return [['!trap', '=message=old style login not supported'], ['!done']];
+      if (sent.length === 1) return [['!done', `=ret=${KNOWN_CHALLENGE}`]];
+      return [['!done']];
+    });
+    const conn = new RosConnection(t); // auto
+    await conn.connect();
+    await conn.login('admin', 's3cret-pass');
+    const bareLogins = t.sent.filter((s) => s.length === 1 && s[0] === '/login');
+    expect(bareLogins).toHaveLength(1);
+    expect(t.sent.indexOf(bareLogins[0]!)).toBe(1); // second sentence, never first
   });
 });

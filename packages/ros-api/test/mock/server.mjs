@@ -6,16 +6,33 @@
  * Listens on 127.0.0.1 only. Implements:
  *   - Word length encoding (1-4 byte encode; 1-5 byte decode per Manual:API)
  *   - Sentences = words terminated by a zero-length word
- *   - Reply sentences: !done / !trap / !re / !fatal, with =.tag= echo
+ *   - Reply sentences: !done / !trap / !re / !fatal, with =.tag= echo.
+ *     A failed command sends `!trap` FOLLOWED by the final `!done`
+ *     (live-verified on RouterOS 6.49.17 — clients must consume both or the
+ *     stream desyncs). `remove` with no id is a silent no-op (`!done`),
+ *     also live-verified.
  *   - BOTH login handshakes:
  *       (i)  pre-6.43 : /login -> !done =ret=<32-hex challenge>
  *                        /login =name= =response=00<md5hex(0x00 + password + challengeBytes)>
  *       (ii) 6.43+/v7 : /login =name= =password= -> !done
- *   - Emulated commands (in-memory):
- *       /system/resource/print, /system/identity/print,
- *       /ip/hotspot/user/print|add|remove|set,
- *       /ip/firewall/filter/print|add|remove,
- *       /queue/simple/print
+ *   - In `--login modern` mode a bare `/login` is REJECTED with !trap
+ *     (mirrors 6.43+, where bare-/login-first fails)
+ *   - Generic in-memory CRUD for the full @mtk/ros-api builder surface:
+ *       /ip/hotspot, /ip/hotspot/profile, /ip/hotspot/user,
+ *       /ip/hotspot/user/profile, /ip/hotspot/walled-garden,
+ *       /ip/hotspot/walled-garden/ip,
+ *       /ip/firewall/filter|nat|mangle (+ move), /ip/firewall/address-list,
+ *       /queue/simple|tree (+ move),
+ *       /ppp/secret, /ppp/profile, /ppp/active,
+ *       /system/scheduler, /system/script, /system/note, /system/identity,
+ *       /ip/address, /ip/dhcp-server, /ip/dhcp-server/network, /ip/pool,
+ *       /interface/sstp-client, /interface (print)
+ *     with ?k=v print filters, =numbers=/=.id= targeting, and =ret=<id> on add.
+ *   - Device-faithful quirks:
+ *       * /interface/sstp-client/add accepts ONLY connect-to/user/password
+ *         (anything else -> !trap; the rest must go through .../set)
+ *       * /system/identity/set rejects =comment= with !trap
+ *         (identity exposes only `name`; the UUID stamp lives in /system note)
  *   - Unknown commands -> !trap =message=unknown command
  *
  * Usage:
@@ -113,6 +130,7 @@ class SentenceDecoder {
     return word;
   }
 }
+
 /* ---------------- in-memory device state ---------------- */
 
 function nextIdFactory() {
@@ -121,12 +139,55 @@ function nextIdFactory() {
 }
 const nextId = nextIdFactory();
 
-const state = {
-  hotspotUsers: [],   // {'.id', server, name, password, profile, limit-uptime, limit-bytes-total, disabled, comment}
-  firewallFilter: [], // {'.id', chain, action, protocol, dst-port, src-address, dst-address, comment, disabled}
-  queues: [
-    { '.id': '*Q1', name: 'default', target: '10.0.0.0/24', 'max-limit': '10M/10M', disabled: 'no' },
-  ],
+const tables = new Map();
+const T = (key, seed = []) => {
+  if (!tables.has(key)) tables.set(key, seed.map((r) => ({ ...r })));
+  return tables.get(key);
+};
+
+// Generic CRUD registry: base command -> { table key, default attrs on add }.
+// Matched by LONGEST prefix first (so /ip/hotspot/user/profile wins over /ip/hotspot/user).
+const CRUD = {
+  '/ip/hotspot/user/profile': { t: 'hsUserProfiles', d: {} },
+  '/ip/hotspot/walled-garden/ip': { t: 'wgIp', d: {} },
+  '/ip/hotspot/walled-garden': { t: 'wg', d: {} },
+  '/ip/hotspot/profile': { t: 'hsProfiles', d: {} },
+  '/ip/hotspot/user': { t: 'hsUsers', d: { server: 'all', profile: 'default', 'limit-uptime': '0', 'limit-bytes-total': '0', disabled: 'no' } },
+  '/ip/hotspot': { t: 'hsServers', d: { disabled: 'no' } },
+  '/ip/firewall/address-list': { t: 'fwAddrList', d: { disabled: 'no' } },
+  '/ip/firewall/filter': { t: 'fwFilter', d: { disabled: 'no' } },
+  '/ip/firewall/nat': { t: 'fwNat', d: { disabled: 'no' } },
+  '/ip/firewall/mangle': { t: 'fwMangle', d: { disabled: 'no' } },
+  '/queue/simple': { t: 'qSimple', d: { disabled: 'no' } },
+  '/queue/tree': { t: 'qTree', d: { disabled: 'no' } },
+  '/ppp/secret': { t: 'pppSecrets', d: {} },
+  '/ppp/profile': { t: 'pppProfiles', d: {} },
+  '/ppp/active': { t: 'pppActive', d: {} },
+  '/system/scheduler': { t: 'sched', d: { disabled: 'no' } },
+  '/system/script': { t: 'scripts', d: {} },
+  '/ip/dhcp-server/network': { t: 'dhcpNet', d: {} },
+  '/ip/dhcp-server': { t: 'dhcpSrv', d: { disabled: 'no' } },
+  '/ip/address': { t: 'ipAddr', d: { disabled: 'no' } },
+  '/ip/pool': { t: 'pools', d: {} },
+  '/interface/sstp-client': { t: 'sstp', d: { disabled: 'no' } },
+};
+const CRUD_BASES = Object.keys(CRUD).sort((a, b) => b.length - a.length);
+
+// static seeds (visible to print queries)
+T('qSimple', [
+  { '.id': '*Q1', name: 'default', target: '10.0.0.0/24', 'max-limit': '10M/10M', disabled: 'no' },
+]);
+T('neighbors', [
+  { '.id': '*N1', interface: 'ether1', 'mac-address': 'AA:BB:CC:DD:EE:01', identity: 'downstream-ap', platform: 'MikroTik', version: '7.15.3 (stable)', address: '192.168.88.10' },
+  { '.id': '*N2', interface: 'ether2', 'mac-address': 'AA:BB:CC:DD:EE:02', identity: 'pos-terminal', platform: '', version: '', address: '192.168.88.11' },
+]);
+T('interfaces', [
+  { '.id': '*I1', name: 'ether1', type: 'ether', mtu: '1500', 'mac-address': 'AA:BB:CC:DD:EE:FF', running: 'true', disabled: 'no' },
+  { '.id': '*I2', name: 'ether2', type: 'ether', mtu: '1500', 'mac-address': 'AA:BB:CC:DD:EE:FE', running: 'false', disabled: 'no' },
+]);
+const singletons = {
+  identity: { name: 'mock-router' },
+  note: { note: '' },
 };
 
 /* ---------------- sentence helpers ---------------- */
@@ -167,7 +228,12 @@ function handleConnection(sock) {
   const send = (words) => sock.write(encodeSentence(words));
   const tagW = (tag) => (tag != null ? [`=.tag=${tag}`] : []);
   const done = (tag, extra = []) => send(['!done', ...tagW(tag), ...extra]);
-  const trap = (tag, message) => send(['!trap', ...tagW(tag), `=message=${message}`]);
+  // Live-verified on RouterOS 6.49.17: a failed command sends !trap FOLLOWED
+  // by the final !done. Clients must consume both or the stream desyncs.
+  const trap = (tag, message) => {
+    send(['!trap', ...tagW(tag), `=message=${message}`]);
+    send(['!done', ...tagW(tag)]);
+  };
   const fatal = (message) => send(['!fatal', `=message=${message}`]);
 
   function doLogin(words, tag) {
@@ -202,15 +268,82 @@ function handleConnection(sock) {
     return done(tag, [`=ret=${challenge.toString('hex')}`]);
   }
 
-  function findRows(table, idWord) {
-    const ids = String(idWord).split(',').map(s => s.trim()).filter(Boolean);
-    return table.filter(r => ids.includes(r['.id']));
+  function targetIds(args) {
+    const idw = args.numbers ?? args['.id'];
+    if (!idw) return null;
+    return String(idw).split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  /** Generic CRUD op dispatch for a registered base command. */
+  function doCrud(base, op, args, query, tag) {
+    const reg = CRUD[base];
+    const rows = T(reg.t);
+    switch (op) {
+      case 'print': {
+        for (const r of applyQuery(rows, query)) send(['!re', ...tagW(tag), ...rowToWords(r)]);
+        return done(tag);
+      }
+      case 'add': {
+        const row = { '.id': nextId(), ...reg.d, ...args };
+        rows.push(row);
+        return done(tag, [`=ret=${row['.id']}`]);
+      }
+      case 'set': {
+        const ids = targetIds(args);
+        if (!ids) return trap(tag, 'no numbers specified');
+        const hits = rows.filter(r => ids.includes(r['.id']));
+        if (!hits.length) return trap(tag, 'no such item');
+        for (const r of hits)
+          for (const [k, v] of Object.entries(args))
+            if (k !== 'numbers' && k !== '.id') r[k] = v;
+        return done(tag);
+      }
+      case 'remove': {
+        const ids = targetIds(args);
+        // live 6.49.17: remove with no id at all is a silent no-op (!done)
+        if (!ids) return done(tag);
+        const before = rows.length;
+        const kept = rows.filter(r => !ids.includes(r['.id']));
+        if (kept.length === before) return trap(tag, 'no such item');
+        tables.set(reg.t, kept);
+        return done(tag);
+      }
+      case 'enable':
+      case 'disable': {
+        const ids = targetIds(args);
+        if (!ids) return trap(tag, 'no numbers specified');
+        const hits = rows.filter(r => ids.includes(r['.id']));
+        if (!hits.length) return trap(tag, 'no such item');
+        for (const r of hits) r.disabled = op === 'disable' ? 'yes' : 'no';
+        return done(tag);
+      }
+      case 'move': {
+        const ids = targetIds(args);
+        const dest = args.destination;
+        if (!ids || !dest) return trap(tag, 'no numbers specified');
+        const moving = rows.filter(r => ids.includes(r['.id']));
+        if (!moving.length) return trap(tag, 'no such item');
+        const rest = rows.filter(r => !ids.includes(r['.id']));
+        const destIdx = rest.findIndex(r => r['.id'] === dest);
+        if (destIdx < 0) {
+          // destination is the moved item itself (or unknown) -> append at end
+          if (!moving.some(r => r['.id'] === dest)) return trap(tag, 'no such item');
+          tables.set(reg.t, [...rest, ...moving]);
+        } else {
+          tables.set(reg.t, [...rest.slice(0, destIdx), ...moving, ...rest.slice(destIdx)]);
+        }
+        return done(tag);
+      }
+      default:
+        return null; // not a CRUD op -> caller falls through to unknown-command trap
+    }
   }
 
   function doCommand(words, tag) {
     const [cmd, ...rest] = words;
     const { args, query } = splitArgs(words);
 
+    // fixed special-case commands
     switch (cmd) {
       case '/system/resource/print': {
         const row = {
@@ -233,85 +366,94 @@ function handleConnection(sock) {
         return done(tag);
       }
       case '/system/identity/print': {
-        send(['!re', ...tagW(tag), '=name=mock-router']);
+        send(['!re', ...tagW(tag), ...rowToWords({ '.id': '*1', name: singletons.identity.name })]);
         return done(tag);
       }
-      case '/queue/simple/print': {
-        for (const q of applyQuery(state.queues, query))
-          send(['!re', ...tagW(tag), ...rowToWords(q)]);
+      case '/system/identity/set': {
+        // real devices reject =comment= here (identity exposes only `name`)
+        if (args.comment !== undefined) return trap(tag, 'unknown parameter');
+        if (args.name !== undefined) singletons.identity.name = args.name;
         return done(tag);
       }
-      case '/ip/hotspot/user/print': {
-        for (const u of applyQuery(state.hotspotUsers, query))
-          send(['!re', ...tagW(tag), ...rowToWords(u)]);
+      case '/system/note/print': {
+        send(['!re', ...tagW(tag), ...rowToWords({ '.id': '*1', note: singletons.note.note })]);
         return done(tag);
       }
-      case '/ip/hotspot/user/add': {
-        const row = {
-          '.id': nextId(),
-          'server': args.server ?? 'all',
-          'name': args.name ?? '',
-          'password': args.password ?? '',
-          'profile': args.profile ?? 'default',
-          'limit-uptime': args['limit-uptime'] ?? '0',
-          'limit-bytes-total': args['limit-bytes-total'] ?? '0',
-          'disabled': args.disabled ?? 'no',
-          'comment': args.comment ?? '',
-        };
-        state.hotspotUsers.push(row);
-        return done(tag, [`=ret=${row['.id']}`]);
-      }
-      case '/ip/hotspot/user/set': {
-        const idw = args.numbers ?? args['.id'];
-        if (!idw) return trap(tag, 'no numbers specified');
-        const rows = findRows(state.hotspotUsers, idw);
-        if (!rows.length) return trap(tag, 'no such item');
-        for (const r of rows)
-          for (const [k, v] of Object.entries(args))
-            if (k !== 'numbers' && k !== '.id') r[k] = v;
+      case '/system/note/set': {
+        if (args.note !== undefined) singletons.note.note = args.note;
         return done(tag);
       }
-      case '/ip/hotspot/user/remove': {
-        const idw = args.numbers ?? args['.id'];
-        if (!idw) return trap(tag, 'no numbers specified');
-        const ids = String(idw).split(',').map(s => s.trim());
-        const before = state.hotspotUsers.length;
-        state.hotspotUsers = state.hotspotUsers.filter(r => !ids.includes(r['.id']));
-        if (state.hotspotUsers.length === before) return trap(tag, 'no such item');
+      case '/system/routerboard/print': {
+        send(['!re', ...tagW(tag), ...rowToWords({
+          '.id': '*1', 'routerboard': 'yes', 'board-name': OPTS.board,
+          'model': 'CHR', 'serial-number': 'MOCK123456',
+          'firmware-type': 'x86_64', 'factory-firmware': OPTS.rosVersion,
+          'current-firmware': OPTS.rosVersion, 'upgrade-firmware': OPTS.rosVersion,
+        })]);
         return done(tag);
       }
-      case '/ip/firewall/filter/print': {
-        for (const r of applyQuery(state.firewallFilter, query))
+      case '/system/package/print': {
+        for (const p of [
+          { '.id': '*P1', name: 'routeros', version: OPTS.rosVersion, disabled: 'no' },
+          { '.id': '*P2', name: 'system', version: OPTS.rosVersion, disabled: 'no' },
+        ]) send(['!re', ...tagW(tag), ...rowToWords(p)]);
+        return done(tag);
+      }
+      case '/export': {
+        for (const line of [
+          `# mock export by RouterOS ${OPTS.rosVersion}`,
+          '/system identity',
+          `set name=${singletons.identity.name}`,
+          '/ip hotspot user',
+        ]) send(['!re', ...tagW(tag), line]);
+        return done(tag);
+      }
+      case '/ip/neighbor/print': {
+        for (const r of applyQuery(T('neighbors'), query))
           send(['!re', ...tagW(tag), ...rowToWords(r)]);
         return done(tag);
       }
-      case '/ip/firewall/filter/add': {
-        const row = {
-          '.id': nextId(),
-          'chain': args.chain ?? 'forward',
-          'action': args.action ?? 'accept',
-          'protocol': args.protocol ?? '',
-          'dst-port': args['dst-port'] ?? '',
-          'src-address': args['src-address'] ?? '',
-          'dst-address': args['dst-address'] ?? '',
-          'comment': args.comment ?? '',
-          'disabled': args.disabled ?? 'no',
-        };
-        state.firewallFilter.push(row);
-        return done(tag, [`=ret=${row['.id']}`]);
-      }
-      case '/ip/firewall/filter/remove': {
-        const idw = args.numbers ?? args['.id'];
-        if (!idw) return trap(tag, 'no numbers specified');
-        const ids = String(idw).split(',').map(s => s.trim());
-        const before = state.firewallFilter.length;
-        state.firewallFilter = state.firewallFilter.filter(r => !ids.includes(r['.id']));
-        if (state.firewallFilter.length === before) return trap(tag, 'no such item');
+      case '/interface/print': {
+        for (const r of applyQuery(T('interfaces'), query))
+          send(['!re', ...tagW(tag), ...rowToWords(r)]);
         return done(tag);
       }
-      default:
-        return trap(tag, 'unknown command');
+      case '/system/backup/save': {
+        // pretend the backup file was written
+        return done(tag);
+      }
+      case '/system/script/run': {
+        const ids = targetIds(args);
+        if (!ids) return trap(tag, 'no numbers specified');
+        const hits = T('scripts').filter(r => ids.includes(r['.id']));
+        if (!hits.length) return trap(tag, 'no such item');
+        return done(tag); // pretend the script ran
+      }
     }
+
+    // generic CRUD dispatch (longest base prefix first)
+    for (const base of CRUD_BASES) {
+      if (cmd === base || cmd.startsWith(base + '/')) {
+        const op = cmd.slice(base.length + 1); // e.g. 'add', 'print', 'set'
+        // sstp-client creation quirk: only connect-to/user/password allowed
+        if (base === '/interface/sstp-client' && op === 'add') {
+          const allowed = new Set(['connect-to', 'user', 'password']);
+          const bad = Object.keys(args).filter(k => !allowed.has(k));
+          if (bad.length) {
+            return trap(tag, `only connect-to, user and password may be set at creation (use /interface/sstp-client/set for the rest): ${bad.join(',')}`);
+          }
+        }
+        // live 6.49.17: `port` is not a valid sstp-client parameter at all
+        // (the port travels inside connect-to as host:port)
+        if (base === '/interface/sstp-client' && op === 'set' && args.port !== undefined) {
+          return trap(tag, 'unknown parameter');
+        }
+        const handled = doCrud(base, op, args, query, tag);
+        if (handled !== null) return;
+        break;
+      }
+    }
+    return trap(tag, 'unknown command');
   }
 
   sock.on('data', (chunk) => {

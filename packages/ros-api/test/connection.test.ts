@@ -22,7 +22,7 @@ describe('talk', () => {
   });
 
   it('throws RosTrapError on !trap with the device message', async () => {
-    const t = scriptedTransport({ '/bad': [['!trap', '=message=no such command']] });
+    const t = scriptedTransport({ '/bad': [['!trap', '=message=no such command'], ['!done']] });
     const conn = new RosConnection(t);
     await conn.connect();
     const err = await conn.talk(['/bad']).catch((e) => e);
@@ -35,6 +35,28 @@ describe('talk', () => {
     const conn = new RosConnection(t);
     await conn.connect();
     await expect(conn.talk(['/x'])).rejects.toBeInstanceOf(RosFatalError);
+  });
+
+  /**
+   * REGRESSION (live-verified 2026-10-16 on RouterOS 6.49.17): a failed
+   * command's reply is `!trap` FOLLOWED by the final `!done`. The client must
+   * consume both — stopping at `!trap` leaves the trailing `!done` in the
+   * stream and desyncs every later command on the session (their replies
+   * shift by one: prints come back empty, adds lose their =ret=).
+   */
+  it('consumes the !done that follows a !trap (no stream desync)', async () => {
+    const t = new FakeTransport();
+    t.respondWith((sent) => {
+      if (sent[0] === '/bad') return [['!trap', '=message=nope'], ['!done']];
+      return [['!re', '=.id=*1', '=name=ok'], ['!done']];
+    });
+    const conn = new RosConnection(t);
+    await conn.connect();
+    await expect(conn.talk(['/bad'])).rejects.toBeInstanceOf(RosTrapError);
+    // the trailing !done was consumed: the next command reads its OWN reply
+    const rows = replyRows(await conn.talk(['/ok']));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ name: 'ok' });
   });
 });
 
