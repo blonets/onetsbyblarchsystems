@@ -17,6 +17,7 @@
 
 import { filterRuleList, filterRuleRemove, filterRuleSet, replyRows, parseYesNo } from '@mtk/ros-api';
 import type { FilterRuleInput } from '@mtk/ros-api';
+import { collectReplyRows } from './commands.job.js';
 import { healthPing } from '../ros-ext.js';
 import type { ConnectionManager } from '../connection-manager.js';
 import type { AuditSink } from '../audit.js';
@@ -141,7 +142,7 @@ export async function safeApplyFirewallChange(
   await auditIt('safe-apply.start', 'pending', { before: { rules: before.length } });
   const rows = await deps.manager.execute(
     routerId,
-    async (conn) => args.apply((words) => conn.talk(words).then(replyRows)),
+    async (conn) => args.apply((words) => conn.talk(words).then(collectReplyRows)),
     { opId },
   );
   await events.emit({

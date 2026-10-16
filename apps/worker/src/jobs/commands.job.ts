@@ -21,8 +21,20 @@
  */
 
 import type { Job } from 'bullmq';
-import { RosTrapError, replyRows } from '@mtk/ros-api';
+import { RosTrapError, replyRows, type ReplySentence } from '@mtk/ros-api';
 import type { CommandResultPayload, RosCommandJob } from '@mtk/types';
+
+export function collectReplyRows(replies: ReplySentence[]): Record<string, string>[] {
+  const rows: Record<string, string>[] = [];
+  for (const r of replies) {
+    if (r.type === 're') {
+      rows.push(r.attrs);
+    } else if (r.type === 'done' && r.attrs.ret) {
+      rows.push({ '.id': r.attrs.ret, id: r.attrs.ret, ret: r.attrs.ret, ...r.attrs });
+    }
+  }
+  return rows;
+}
 import type { ConnectionManager } from '../connection-manager.js';
 import { RouterMutex } from '../router-mutex.js';
 import { InMemoryIdempotencyStore, type IdempotencyStore } from '../idempotency.js';
@@ -157,7 +169,7 @@ export function createCommandsProcessor(deps: CommandsDeps) {
                 async (conn) => {
                   const rows: Record<string, string>[] = [];
                   for (const sentence of sentences) {
-                    rows.push(...replyRows(await conn.talk(sentence)));
+                    rows.push(...collectReplyRows(await conn.talk(sentence)));
                   }
                   return { rows: rows.length, reverted: false, allRows: rows };
                 },

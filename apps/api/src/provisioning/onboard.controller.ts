@@ -31,23 +31,35 @@ export class OnboardController {
   constructor(private readonly provisioning: ProvisioningService) {}
 
   @Public()
-  @Get(':token/onboard.rsc')
+  @Get([':token/onboard.rsc', ':token/onboard.rsc:suffix'])
   @Header('Content-Type', 'text/plain; charset=utf-8')
   getScript(
     @Param('token') token: string,
+    @Param('suffix') suffix?: string,
     @Query('v') version?: string,
   ): Promise<string> {
-    return this.provisioning.getOnboardScript(token, version);
+    let ver = version;
+    if (!ver && suffix) {
+      const match = /^[?&]?v=([^&]+)/.exec(suffix);
+      if (match) ver = match[1];
+    }
+    return this.provisioning.getOnboardScript(token, ver);
   }
 
   @Public()
-  @Get(':uuid/sync.rsc')
+  @Get([':uuid/sync.rsc', ':uuid/sync.rsc:suffix'])
   @Header('Content-Type', 'text/plain; charset=utf-8')
   getSyncScript(
     @Param('uuid') uuid: string,
+    @Param('suffix') suffix?: string,
     @Query('v') version?: string,
   ): Promise<string> {
-    return this.provisioning.getSyncScript(uuid, version);
+    let ver = version;
+    if (!ver && suffix) {
+      const match = /^[?&]?v=([^&]+)/.exec(suffix);
+      if (match) ver = match[1];
+    }
+    return this.provisioning.getSyncScript(uuid, ver);
   }
 
   @Public()

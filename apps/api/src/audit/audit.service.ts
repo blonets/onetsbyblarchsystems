@@ -26,6 +26,20 @@ export class AuditService {
   constructor(@Inject(DB_PORT) private readonly db: DbPort) {}
 
   async append(input: AppendAuditInput): Promise<{ id: string; opId: string }> {
+    if (input.opId) {
+      const existing = await this.db.auditLogs.findUnique({ opId: input.opId });
+      if (existing) {
+        const patch: Record<string, unknown> = {};
+        if (input.result !== undefined) patch.result = input.result;
+        if (input.error !== undefined) patch.error = input.error;
+        if (input.after !== undefined && input.after !== null) patch.after = input.after;
+        if (input.before !== undefined && input.before !== null) patch.before = input.before;
+        if (Object.keys(patch).length > 0) {
+          await this.db.auditLogs.update({ opId: input.opId }, patch);
+        }
+        return { id: existing.id, opId: existing.opId };
+      }
+    }
     const data: NewAuditLog = {
       actorId: input.actorId ?? null,
       routerId: input.routerId ?? null,

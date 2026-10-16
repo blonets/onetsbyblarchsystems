@@ -30,7 +30,7 @@ export interface EnqueueRosInput {
    * Mirror-row pointer for mikrotikId reconciliation on success.
    * Stored inside the audit `after` as `entity`.
    */
-  entity?: { table: 'hotspot' | 'firewall' | 'queue'; id: string };
+  entity?: { table: string; id: string };
   /** Filter-table changes pass safe-apply; the worker verifies reachability after apply. */
   safeApply?: { verifyAfterMs: number };
   /** Dispatches result rows to a domain ingest handler (e.g. downstream discovery). */
@@ -219,15 +219,55 @@ export class RouterCommandsService {
     audit: { after: unknown },
     row: Record<string, string>,
   ): Promise<void> {
-    const deviceId = row['.id'] ?? row['id'];
+    const deviceId = row['.id'] ?? row['id'] ?? row['ret'];
     if (!deviceId) return;
     const entity = (audit.after as { entity?: { table: string; id: string } } | null)?.entity;
     if (!entity) return;
     try {
       switch (entity.table) {
-        case 'hotspot':
+        case 'hotspot-user':
           await this.db.hotspotUsers.update({ id: entity.id }, { mikrotikId: deviceId });
           break;
+        case 'hotspot-server':
+          await this.db.hotspotServers.update({ id: entity.id }, { mikrotikId: deviceId });
+          break;
+        case 'hotspot-profile':
+          await this.db.hotspotProfiles.update({ id: entity.id }, { mikrotikId: deviceId });
+          break;
+        case 'hotspot-user-profile':
+          await this.db.hotspotUserProfiles.update({ id: entity.id }, { mikrotikId: deviceId });
+          break;
+        case 'hotspot-walled-garden':
+          await this.db.hotspotWalledGardens.update({ id: entity.id }, { mikrotikId: deviceId });
+          break;
+        case 'hotspot': {
+          const user = await this.db.hotspotUsers.findUnique({ id: entity.id });
+          if (user) {
+            await this.db.hotspotUsers.update({ id: entity.id }, { mikrotikId: deviceId });
+            break;
+          }
+          const server = await this.db.hotspotServers.findUnique({ id: entity.id });
+          if (server) {
+            await this.db.hotspotServers.update({ id: entity.id }, { mikrotikId: deviceId });
+            break;
+          }
+          const userProfile = await this.db.hotspotUserProfiles.findUnique({ id: entity.id });
+          if (userProfile) {
+            await this.db.hotspotUserProfiles.update({ id: entity.id }, { mikrotikId: deviceId });
+            break;
+          }
+          const profile = await this.db.hotspotProfiles.findUnique({ id: entity.id });
+          if (profile) {
+            await this.db.hotspotProfiles.update({ id: entity.id }, { mikrotikId: deviceId });
+            break;
+          }
+          const wg = await this.db.hotspotWalledGardens.findUnique({ id: entity.id });
+          if (wg) {
+            await this.db.hotspotWalledGardens.update({ id: entity.id }, { mikrotikId: deviceId });
+            break;
+          }
+          break;
+        }
         case 'firewall':
           await this.db.firewallRules.update({ id: entity.id }, { mikrotikId: deviceId });
           break;

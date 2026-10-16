@@ -30,6 +30,7 @@ import {
   walledGardenSet,
 } from '@mtk/ros-api';
 import {
+  newOpId,
   type HotspotExpiryMode,
   type HotspotProfile,
   type HotspotServer,
@@ -181,7 +182,7 @@ export class HotspotService {
       opId?: string;
       before?: unknown;
       after?: unknown;
-      entity?: { table: 'hotspot'; id: string };
+      entity?: { table: string; id: string };
     } = {},
   ): Promise<EnqueuedCommand> {
     return this.commands.enqueueRos({
@@ -224,7 +225,7 @@ export class HotspotService {
         profile: dto.profile,
         disabled: dto.disabled,
       }),
-    ], { actor, opId: dto.opId, after: { name: dto.name }, entity: { table: 'hotspot', id: row.id } });
+    ], { actor, opId: dto.opId, after: { name: dto.name }, entity: { table: 'hotspot-server', id: row.id } });
     return { server: toServerDto(row), ...enq };
   }
 
@@ -242,16 +243,18 @@ export class HotspotService {
     );
     const enq = await this.mutate(routerId, 'hotspot.server.update', [
       hotspotServerSet(deviceId, { interface: dto.interface, addressPool: dto.addressPool, profile: dto.profile, disabled: dto.disabled }),
-    ], { actor, opId: dto.opId, before: row, entity: { table: 'hotspot', id } });
+    ], { actor, opId: dto.opId, before: row, entity: { table: 'hotspot-server', id } });
     return { server: toServerDto(updated), ...enq };
   }
 
   async deleteServer(routerId: string, id: string, opId: string | undefined, actor?: CurrentUserType) {
     const row = await this.serverOrThrow(routerId, id);
-    const deviceId = this.needDeviceId(row, 'hotspot server');
     await this.db.hotspotServers.delete({ id });
+    if (!row.mikrotikId) {
+      return { opId: opId ?? newOpId(), auditId: '', jobId: '', replayed: false };
+    }
     const enq = await this.mutate(routerId, 'hotspot.server.delete', [
-      hotspotServerRemove(deviceId),
+      hotspotServerRemove(row.mikrotikId),
     ], { actor, opId, before: row });
     return enq;
   }
@@ -302,7 +305,7 @@ export class HotspotService {
         dnsName: dto.dnsName,
         loginBy: dto.loginBy,
       }),
-    ], { actor, opId: dto.opId, after: { name: dto.name }, entity: { table: 'hotspot', id: row.id } });
+    ], { actor, opId: dto.opId, after: { name: dto.name }, entity: { table: 'hotspot-profile', id: row.id } });
     return { profile: toProfileDto(row), ...enq };
   }
 
@@ -323,16 +326,18 @@ export class HotspotService {
         dnsName: dto.dnsName,
         loginBy: dto.loginBy,
       }),
-    ], { actor, opId: dto.opId, before: row, entity: { table: 'hotspot', id } });
+    ], { actor, opId: dto.opId, before: row, entity: { table: 'hotspot-profile', id } });
     return { profile: toProfileDto(updated), ...enq };
   }
 
   async deleteServerProfile(routerId: string, id: string, opId: string | undefined, actor?: CurrentUserType) {
     const row = await this.serverProfileOrThrow(routerId, id);
-    const deviceId = this.needDeviceId(row, 'server profile');
     await this.db.hotspotProfiles.delete({ id });
+    if (!row.mikrotikId) {
+      return { opId: opId ?? newOpId(), auditId: '', jobId: '', replayed: false };
+    }
     const enq = await this.mutate(routerId, 'hotspot.server-profile.delete', [
-      hotspotServerProfileRemove(deviceId),
+      hotspotServerProfileRemove(row.mikrotikId),
     ], { actor, opId, before: row });
     return enq;
   }
@@ -381,7 +386,7 @@ export class HotspotService {
         idleTimeout: dto.idleTimeout,
         sharedUsers: dto.sharedUsers,
       }),
-    ], { actor, opId: dto.opId, after: { name: dto.name }, entity: { table: 'hotspot', id: row.id } });
+    ], { actor, opId: dto.opId, after: { name: dto.name }, entity: { table: 'hotspot-user-profile', id: row.id } });
     return { profile: toUserProfileDto(row), ...enq };
   }
 
@@ -414,16 +419,18 @@ export class HotspotService {
         idleTimeout: dto.idleTimeout,
         sharedUsers: dto.sharedUsers,
       }),
-    ], { actor, opId: dto.opId, before: row, entity: { table: 'hotspot', id } });
+    ], { actor, opId: dto.opId, before: row, entity: { table: 'hotspot-user-profile', id } });
     return { profile: toUserProfileDto(updated), ...enq };
   }
 
   async deleteUserProfile(routerId: string, id: string, opId: string | undefined, actor?: CurrentUserType) {
     const row = await this.userProfileOrThrow(routerId, id);
-    const deviceId = this.needDeviceId(row, 'user profile');
     await this.db.hotspotUserProfiles.delete({ id });
+    if (!row.mikrotikId) {
+      return { opId: opId ?? newOpId(), auditId: '', jobId: '', replayed: false };
+    }
     const enq = await this.mutate(routerId, 'hotspot.user-profile.delete', [
-      hotspotProfileRemove(deviceId),
+      hotspotProfileRemove(row.mikrotikId),
     ], { actor, opId, before: row });
     return enq;
   }
@@ -543,7 +550,7 @@ export class HotspotService {
       opId: dto.opId,
       // Redacted: the audit never carries the plaintext password.
       after: { name: dto.name, profile: profileName, passwordSet: !!dto.password, macLocked: !!macAddress },
-      entity: { table: 'hotspot', id: row.id },
+      entity: { table: 'hotspot-user', id: row.id },
     });
     return { user: toUserDto(row, profileName), ...enq };
   }
@@ -597,18 +604,20 @@ export class HotspotService {
       opId: dto.opId,
       before: { disabled: row.disabled, profileId: row.profileId },
       after: { disabled: dto.disabled, profile: profileName, passwordSet: dto.password !== undefined, macLocked: !!effectiveMac },
-      entity: { table: 'hotspot', id },
+      entity: { table: 'hotspot-user', id },
     });
     return { user: toUserDto(updated, profileName), ...enq };
   }
 
   async deleteUser(routerId: string, id: string, opId: string | undefined, actor?: CurrentUserType) {
     const row = await this.userOrThrow(routerId, id);
-    const deviceId = this.needDeviceId(row, 'hotspot user');
     if (row.passwordRef) await this.vault.revoke(row.passwordRef).catch(() => undefined);
     await this.db.hotspotUsers.delete({ id });
+    if (!row.mikrotikId) {
+      return { opId: opId ?? newOpId(), auditId: '', jobId: '', replayed: false };
+    }
     const enq = await this.mutate(routerId, 'hotspot.user.delete', [
-      hotspotUserRemove(deviceId),
+      hotspotUserRemove(row.mikrotikId),
     ], { actor, opId, before: { name: row.name } });
     return enq;
   }
@@ -740,7 +749,7 @@ export class HotspotService {
     const enq = await this.mutate(routerId, 'hotspot.walled-garden.create', [sentence], {
       actor, opId: dto.opId,
       after: { kind, dstHost: dto.dstHost, dstAddress: dto.dstAddress },
-      entity: { table: 'hotspot', id: row.id },
+      entity: { table: 'hotspot-walled-garden', id: row.id },
     });
     return { entry: row, ...enq };
   }
@@ -763,19 +772,21 @@ export class HotspotService {
         ? walledGardenSet(deviceId, { dstHost: dto.dstHost, action: dto.action, comment: dto.comment, disabled: dto.disabled })
         : walledGardenIpSet(deviceId, { dstAddress: dto.dstAddress, action: dto.action, comment: dto.comment, disabled: dto.disabled });
     const enq = await this.mutate(routerId, 'hotspot.walled-garden.update', [sentence], {
-      actor, opId: dto.opId, before: row, entity: { table: 'hotspot', id },
+      actor, opId: dto.opId, before: row, entity: { table: 'hotspot-walled-garden', id },
     });
     return { entry: updated, ...enq };
   }
 
   async deleteWalledGarden(routerId: string, id: string, opId: string | undefined, actor?: CurrentUserType) {
     const row = await this.walledGardenOrThrow(routerId, id);
-    const deviceId = this.needDeviceId(row, 'walled-garden entry');
     await this.db.hotspotWalledGardens.delete({ id });
+    if (!row.mikrotikId) {
+      return { opId: opId ?? newOpId(), auditId: '', jobId: '', replayed: false };
+    }
     const enq = await this.mutate(
       routerId,
       'hotspot.walled-garden.delete',
-      [row.kind === 'dns' ? walledGardenRemove(deviceId) : walledGardenIpRemove(deviceId)],
+      [row.kind === 'dns' ? walledGardenRemove(row.mikrotikId) : walledGardenIpRemove(row.mikrotikId)],
       { actor, opId, before: row },
     );
     return enq;

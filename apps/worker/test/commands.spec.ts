@@ -64,6 +64,26 @@ describe('commands processor', () => {
     expect(reporter.results[0]!.rows).toHaveLength(1);
   });
 
+  it('captures ret attribute from !done on add commands', async () => {
+    const { process, reporter } = setup((words) =>
+      words[0] === '/ip/hotspot/user/add'
+        ? [['!done', '=ret=*5']]
+        : reDone([]),
+    );
+    const result = await process(
+      jobOf({
+        kind: 'ros', opId: 'op-add-ret', routerId: 'r1',
+        sentences: [['/ip/hotspot/user/add', '=name=test-user']],
+      }),
+    );
+    expect(result).toMatchObject({ opId: 'op-add-ret', rows: 1 });
+    expect(reporter.results[0]).toMatchObject({
+      opId: 'op-add-ret',
+      ok: true,
+      rows: [expect.objectContaining({ '.id': '*5', ret: '*5' })],
+    });
+  });
+
   it('dedupes duplicate deliveries of a completed op', async () => {
     let calls = 0;
     const { process } = setup(() => {
