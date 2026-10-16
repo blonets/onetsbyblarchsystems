@@ -157,6 +157,156 @@ export interface RouterFilters {
   q?: string;
   status?: RouterStatus | 'all';
   siteId?: string;
+  /** Single tag filter (operator grouping). */
+  tag?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Hotspot vouchers (batch generation)
+// ---------------------------------------------------------------------------
+
+/** 'up' = separate username+password, 'vc' = voucher (username = password). */
+export type VoucherBatchMode = 'up' | 'vc';
+
+/** What happens when a generated code expires. */
+export type VoucherExpiryMode = 'remove' | 'notify' | 'remove_notify' | 'none';
+
+export interface VoucherBatchInput {
+  mode: VoucherBatchMode;
+  count: number;
+  prefix: string;
+  codeLength: number;
+  profileName: string;
+  /** Exclude visually confusing characters (0/O, 1/l/I). Default true. */
+  excludeConfusing: boolean;
+  expiryMode: VoucherExpiryMode;
+  /** true = validity counts from first login; false = limit-uptime from creation. */
+  validityFromFirstLogin: boolean;
+  note: string;
+}
+
+export interface GeneratedVoucher {
+  name: string;
+  password: string;
+}
+
+export interface VoucherBatchResult {
+  batchId: string;
+  /** vc-<batchId>-<yyyymmdd>-<note> */
+  batchComment: string;
+  users: GeneratedVoucher[];
+  createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Hotspot active sessions + fleet-wide session lookup
+// ---------------------------------------------------------------------------
+
+export interface HotspotActiveSession {
+  id: string;
+  routerId: string;
+  username: string;
+  ip: string;
+  mac: string;
+  server: string;
+  uptimeS: number;
+  bytesIn: string;
+  bytesOut: string;
+}
+
+export interface SessionSearchHit {
+  routerId: string;
+  routerName: string;
+  sessions: HotspotActiveSession[];
+}
+
+export interface RevenueSummary {
+  date: string;
+  /** Vouchers redeemed today. */
+  vouchers: number;
+  /** Gross revenue today in `currency`; null when the backend has no figure. */
+  revenue: number | null;
+  currency: string;
+}
+
+// ---------------------------------------------------------------------------
+// Firewall rollback journal
+// ---------------------------------------------------------------------------
+
+export interface FirewallJournalEntry {
+  id: string;
+  routerId: string;
+  createdAt: string;
+  /** e.g. 'apply' | 'rollback' | 'safe-apply' */
+  op: string;
+  ruleCount: number;
+  table?: string;
+  ruleIds: string[];
+  rolledBack: boolean;
+  actor?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Provisioning setup wizard
+// ---------------------------------------------------------------------------
+
+export type WizardStepKey = 'pool' | 'dhcp' | 'nat' | 'walledGarden' | 'dns' | 'hotspot' | 'review';
+
+export interface WizardConfig {
+  poolName: string;
+  poolRange: string;
+  dhcpInterface: string;
+  leaseTime: string;
+  wanInterface: string;
+  walledGardenHosts: string;
+  dnsServers: string;
+  allowRemoteRequests: boolean;
+  hotspotInterface: string;
+  hotspotProfile: string;
+  hotspotDnsName: string;
+}
+
+export interface WizardSentence {
+  step: Exclude<WizardStepKey, 'review'>;
+  text: string;
+}
+
+export interface WizardPreview {
+  opId: string;
+  routerId: string;
+  sentences: WizardSentence[];
+}
+
+export type WizardRunStatus = 'pending' | 'running' | 'done' | 'failed';
+
+export interface WizardStatus {
+  opId: string;
+  status: WizardRunStatus;
+  currentStep?: string;
+  doneSteps: number;
+  totalSteps: number;
+  message?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Fleet bulk operations
+// ---------------------------------------------------------------------------
+
+export type BulkOperation = 'reboot' | 'rotate-secret' | 'trigger-backup';
+
+export interface FleetRouterResult {
+  routerId: string;
+  routerName: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface FleetResult {
+  opId: string;
+  operation: BulkOperation;
+  results: FleetRouterResult[];
+  okCount: number;
+  failCount: number;
 }
 
 // Re-exports so pages can import everything from one place.

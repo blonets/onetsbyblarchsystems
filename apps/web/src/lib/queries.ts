@@ -55,6 +55,11 @@ export const keys = {
   platformUsers: ['admin', 'users'] as const,
   auditLog: (page: number) => ['admin', 'audit-log', page] as const,
   notificationChannels: ['admin', 'notification-channels'] as const,
+  activeSessions: (r: string) => ['hotspot', r, 'active'] as const,
+  sessionSearch: (q: string) => ['monitoring', 'session-search', q] as const,
+  revenue: ['monitoring', 'revenue', 'today'] as const,
+  firewallJournal: (r: string) => ['firewall', r, 'journal'] as const,
+  wizardStatus: (r: string, opId: string) => ['provisioning', r, 'wizard', opId] as const,
 };
 
 /** Optimistic list mutation: apply `update` to the cached list immediately, roll back on error. */
@@ -168,6 +173,36 @@ export function useIssueOnboardingToken() {
       api.issueOnboardingToken(siteId, identity),
   });
 }
+export function usePreviewSetupWizard(routerId: string) {
+  return useMutation({
+    mutationFn: (input: import('./api-client').WizardPreviewRequest) => api.previewSetupWizard(routerId, input),
+  });
+}
+export function useApplySetupWizard(routerId: string) {
+  return useMutation({
+    mutationFn: (opId: string) => api.applySetupWizard(routerId, opId),
+  });
+}
+export function useSetupWizardStatus(routerId: string, opId: string | null) {
+  return useQuery({
+    queryKey: keys.wizardStatus(routerId, opId ?? ''),
+    queryFn: () => api.getSetupWizardStatus(routerId, opId!),
+    enabled: !!routerId && !!opId,
+    // Poll while the run is active; stop once it reaches a terminal state.
+    refetchInterval: (query) => {
+      const s = query.state.data?.status;
+      return s === 'done' || s === 'failed' ? false : 2000;
+    },
+  });
+}
+export function useBulkRouterOperation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ routerIds, operation }: { routerIds: string[]; operation: import('./types').BulkOperation }) =>
+      api.bulkRouterOperation(routerIds, operation),
+    onSettled: () => void qc.invalidateQueries({ queryKey: ['routers'] }),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Hotspot
@@ -278,6 +313,20 @@ export function useBulkImportHotspotUsers(routerId: string) {
     onSettled: () => void qc.invalidateQueries({ queryKey: keys.hotspotUsers(routerId) }),
   });
 }
+export function useGenerateVoucherBatch(routerId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: import('./api-client').VoucherBatchRequest) => api.generateVoucherBatch(routerId, input),
+    onSettled: () => void qc.invalidateQueries({ queryKey: keys.hotspotUsers(routerId) }),
+  });
+}
+export function useResetHotspotUserCounters(routerId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.resetHotspotUserCounters(routerId, id),
+    onSettled: () => void qc.invalidateQueries({ queryKey: keys.hotspotUsers(routerId) }),
+  });
+}
 
 export function useWalledGarden(routerId: string) {
   return useQuery({ queryKey: keys.walledGarden(routerId), queryFn: () => api.listWalledGarden(routerId), enabled: !!routerId });
@@ -383,7 +432,27 @@ export function useApplyFirewallChanges(routerId: string, table: FirewallTable) 
   return useMutation({
     mutationFn: ({ changes, safeApply }: { changes: FirewallChange[]; safeApply: boolean }) =>
       api.applyFirewallChanges(routerId, changes, safeApply),
-    onSettled: () => void qc.invalidateQueries({ queryKey: keys.firewall(routerId, table) }),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: keys.firewall(routerId, table) });
+      void qc.invalidateQueries({ queryKey: keys.firewallJournal(routerId) });
+    },
+  });
+}
+export function useFirewallJournal(routerId: string, enabled = true) {
+  return useQuery({
+    queryKey: keys.firewallJournal(routerId),
+    queryFn: () => api.listFirewallJournal(routerId),
+    enabled: !!routerId && enabled,
+  });
+}
+export function useRollbackFirewallJournal(routerId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (entryId: string) => api.rollbackFirewallJournal(routerId, entryId),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: keys.firewallJournal(routerId) });
+      void qc.invalidateQueries({ queryKey: ['firewall', routerId] });
+    },
   });
 }
 
@@ -479,6 +548,35 @@ export function useDeleteAlertRule() {
   return useMutation({
     mutationFn: (id: string) => api.deleteAlertRule(id),
     onSettled: () => void qc.invalidateQueries({ queryKey: keys.alertRules }),
+  });
+}
+export function useHotspotActiveSessions(routerId: string, enabled = true) {
+  return useQuery({
+    queryKey: keys.activeSessions(routerId),
+    queryFn: () => api.listHotspotActiveSessions(routerId),
+    enabled: !!routerId && enabled,
+    refetchInterval: 15_000,
+  });
+}
+export function useKickHotspotSession(routerId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sessionId: string) => api.kickHotspotSession(routerId, sessionId),
+    onSettled: () => void qc.invalidateQueries({ queryKey: keys.activeSessions(routerId) }),
+  });
+}
+export function useSearchHotspotSessions(q: string) {
+  return useQuery({
+    queryKey: keys.sessionSearch(q),
+    queryFn: () => api.searchHotspotSessions(q),
+    enabled: q.trim().length >= 2,
+  });
+}
+export function useRevenueSummary() {
+  return useQuery({
+    queryKey: keys.revenue,
+    queryFn: () => api.getRevenueSummary(),
+    refetchInterval: 5 * 60_000,
   });
 }
 
