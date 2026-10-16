@@ -48,6 +48,12 @@ export class HealthMonitor {
       if (!this.running) return;
       try {
         await this.probeAll();
+      } catch (err) {
+        // A failed sweep is logged, never fatal: the loop reschedules in
+        // `finally` and retries on the next tick. No rejection may escape
+        // this timer — an unhandled one would kill the worker process.
+        // eslint-disable-next-line no-console
+        console.error('[health-monitor] probe sweep failed; will retry next tick', err);
       } finally {
         if (this.running) this.timer = setTimeout(tick, this.intervalMs);
       }
@@ -63,7 +69,17 @@ export class HealthMonitor {
 
   /** One probe sweep — also callable directly in tests / live validation. */
   async probeAll(): Promise<{ ok: number; missed: number }> {
-    const ids = await this.listRouterIds();
+    let ids: string[];
+    try {
+      ids = await this.listRouterIds();
+    } catch (err) {
+      // The router list comes from the API's internal registry endpoint.
+      // An unreachable API is retryable — log it and skip this sweep rather
+      // than crashing the monitor (and the worker with it).
+      // eslint-disable-next-line no-console
+      console.error('[health-monitor] router list fetch failed; skipping sweep', err);
+      return { ok: 0, missed: 0 };
+    }
     let ok = 0;
     let missed = 0;
     for (const routerId of ids) {

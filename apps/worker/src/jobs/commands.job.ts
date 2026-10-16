@@ -75,7 +75,7 @@ export class HttpResultReporter implements ResultReporter {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${this.serviceToken}`,
+        'x-internal-key': this.serviceToken,
       },
       body: JSON.stringify(result),
     });

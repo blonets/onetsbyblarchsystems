@@ -4,7 +4,7 @@
  * Credentials NEVER live in files or git: the registry hands the worker
  * endpoint descriptors, and passwords are supplied only via the process
  * environment at runtime (vault/KMS reference) or fetched from the API's
- * internal credentials endpoint (itself bearer-authenticated).
+ * internal credentials endpoint (itself authenticated via `x-internal-key`).
  */
 
 export interface RouterEndpoint {
@@ -81,7 +81,8 @@ export class StaticRouterRegistry implements RouterRegistry {
  * HTTP registry backed by the platform API (deploy-time wiring).
  * The API owns the Router table + vault references; the worker fetches
  * endpoint descriptors and short-lived per-router passwords from the API's
- * internal endpoints with a service bearer token.
+ * internal endpoints, authenticated with the shared internal key
+ * (`x-internal-key` header — the API's InternalGuard scheme).
  */
 export class HttpRouterRegistry implements RouterRegistry {
   constructor(
@@ -92,7 +93,7 @@ export class HttpRouterRegistry implements RouterRegistry {
 
   async listRouterIds(): Promise<string[]> {
     const res = await this.fetchImpl(`${this.baseUrl}/internal/worker/routers`, {
-      headers: { authorization: `Bearer ${this.serviceToken}` },
+      headers: { 'x-internal-key': this.serviceToken },
     });
     if (!res.ok) throw new Error(`router registry list failed: HTTP ${res.status}`);
     const body = (await res.json()) as { routerIds: string[] };
@@ -102,7 +103,7 @@ export class HttpRouterRegistry implements RouterRegistry {
   async getEndpoint(routerId: string): Promise<RouterEndpoint> {
     const res = await this.fetchImpl(
       `${this.baseUrl}/internal/worker/routers/${encodeURIComponent(routerId)}/endpoint`,
-      { headers: { authorization: `Bearer ${this.serviceToken}` } },
+      { headers: { 'x-internal-key': this.serviceToken } },
     );
     if (res.status === 404) throw new UnknownRouterError(routerId);
     if (!res.ok) throw new Error(`router endpoint fetch failed: HTTP ${res.status}`);

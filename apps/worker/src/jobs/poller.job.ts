@@ -68,7 +68,18 @@ export function createPollerProcessor(deps: PollerDeps) {
 
   return async (job: Job<PollerJobData>): Promise<PollerResult> => {
     const { shardIndex, shardCount } = job.data;
-    const mine = selectShardRouterIds(await deps.listRouterIds(), shardIndex, shardCount);
+    let allIds: string[];
+    try {
+      allIds = await deps.listRouterIds();
+    } catch (err) {
+      // Registry/API outage is retryable: log it and complete this tick as
+      // a no-op — the next scheduled tick retries. Never fail the process
+      // (or spam failed jobs) over a transient API failure.
+      // eslint-disable-next-line no-console
+      console.error('[poller] router list fetch failed; skipping tick', err);
+      return { polled: 0, failed: 0, gaps: [] };
+    }
+    const mine = selectShardRouterIds(allIds, shardIndex, shardCount);
     let failed = 0;
     const gapHits: PollerResult['gaps'] = [];
 

@@ -5,21 +5,20 @@
  * Queue names and job/event shapes are the canonical contracts from
  * `@mtk/types` (the API enqueues to these exact names):
  * commands, provision, backup, metrics-ingest, quota, notify.
- * The poller is worker-internal (`poll` queue, repeatable `poll-tick`); the
- * hotspot expiry sweep is worker-internal too (`expiry` queue, repeatable
- * `expiry-sweep-tick` every 15 min).
+ * The poller is worker-internal (`poll` queue, repeatable `poll-tick`).
  *
  * Schedulers owned by this replica:
  * - `poll-tick` every 60 s → polls this replica's shard → `metrics-ingest`
  * - `quota-tick` every 5 min → one `quota` job per owned router
- * - `expiry-sweep-tick` every 15 min → one `hotspot-expiry-sweep` job per owned router
  * - `backup-janitor` daily 03:30 → retention cleanup
  * - per-router `backup-<id>` daily 02:00–05:00 staggered (ARCH §3.4)
  *
  * Environment:
  *   REDIS_URL, DATABASE_URL (deploy-time repositories),
  *   WORKER_SHARD_INDEX / WORKER_SHARD_COUNT,
- *   API_BASE_URL + WORKER_SERVICE_TOKEN (router registry, audit, results),
+ *   API_BASE_URL + INTERNAL_API_KEY (router registry, audit, results —
+ *   sent as the `x-internal-key` header; WORKER_SERVICE_TOKEN is a legacy
+ *   fallback name for the same shared key),
  *   BACKUP_KMS_KEY (64 hex chars), BACKUP_KMS_KEY_ID, BACKUP_DIR,
  *   HUB_ROUTER_ID, ALLOW_HUB_MUTATIONS=1 (provisioning; default off),
  *   ALLOW_BINARY_RESTORE=1 (explicit opt-in).
@@ -50,11 +49,6 @@ import {
 import { createRestoreProcessor } from './jobs/restore.job.js';
 import { createCommandsProcessor, HttpResultReporter } from './jobs/commands.job.js';
 import { createQuotaProcessor } from './jobs/quota.job.js';
-import {
-  createExpirySweepProcessor,
-  HttpHotspotUserDirectory,
-  type HotspotExpirySweepJob,
-} from './jobs/expiry-sweep.job.js';
 import { createProvisionProcessor } from './jobs/provision.job.js';
 import { selectShardRouterIds } from './sharding.js';
 
@@ -87,13 +81,13 @@ async function main(): Promise<void> {
   const shardIndex = Number(process.env.WORKER_SHARD_INDEX ?? 0);
   const shardCount = Number(process.env.WORKER_SHARD_COUNT ?? 1);
   const apiBase = process.env.API_BASE_URL ?? 'http://localhost:3000';
-  const serviceToken = process.env.WORKER_SERVICE_TOKEN ?? '';
+  // Shared worker↔API internal key (x-internal-key). INTERNAL_API_KEY is the
+  // canonical name (matches the API's InternalGuard); WORKER_SERVICE_TOKEN
+  // remains as a fallback for older deployments.
+  const internalKey = process.env.INTERNAL_API_KEY ?? process.env.WORKER_SERVICE_TOKEN ?? '';
   const usePostgres = !!process.env.DATABASE_URL;
-  // The hub CHR id — the expiry sweep (like everything except provisioning)
-  // must never run against it.
-  const hubRouterId = process.env.HUB_ROUTER_ID ?? 'hub';
 
-  const registry: RouterRegistry = new HttpRouterRegistry(apiBase, serviceToken);
+  const registry: RouterRegistry = new HttpRouterRegistry(apiBase, internalKey);
   const manager = new ConnectionManager(makeConnectionFactory(registry));
   // The hub CHR gets its own manager so provision jobs never contend with
   // site-router sessions (and can use the hub's own credentials).
@@ -102,11 +96,11 @@ async function main(): Promise<void> {
   const downtime = usePostgres
     ? new PostgresDowntimeRepository(pool())
     : new InMemoryDowntimeRepository();
-  const audit = serviceToken
-    ? new HttpAuditSink(apiBase, serviceToken)
+  const audit = internalKey
+    ? new HttpAuditSink(apiBase, internalKey)
     : new InMemoryAuditSink();
-  const reporter = serviceToken
-    ? new HttpResultReporter(apiBase, serviceToken)
+  const reporter = internalKey
+    ? new HttpResultReporter(apiBase, internalKey)
     : undefined;
 
   // Bridge manager status events → canonical bus events on the notify queue
@@ -174,29 +168,19 @@ async function main(): Promise<void> {
     noteActivity: (id) => health.noteActivity(id),
   });
   const enqueueQuotaTick = async (): Promise<void> => {
-    for (const routerId of await myRouters()) {
-      const job: QuotaJob = { kind: 'quota', opId: newOpId(), routerId };
-      await quotaQueue.add(`quota-${routerId}`, job, {
-        jobId: `quota-tick-${routerId}`,
-        removeOnComplete: 100,
-        removeOnFail: 200,
-      });
-    }
-  };
-  // v7 never disables expired hotspot users — the sweep enforces expiry
-  // (disable + kick; remove when the user's expiryMode calls for it).
-  const enqueueExpirySweepTick = async (): Promise<void> => {
-    for (const routerId of await myRouters()) {
-      const job: HotspotExpirySweepJob = {
-        kind: 'hotspot-expiry-sweep',
-        opId: newOpId(),
-        routerId,
-      };
-      await expiryQueue.add('hotspot-expiry-sweep', job, {
-        jobId: `expiry-sweep-tick-${routerId}`,
-        removeOnComplete: 100,
-        removeOnFail: 200,
-      });
+    // Registry/API outages are retryable: log and let the next tick retry.
+    // A failed router-list fetch must never take the worker down.
+    try {
+      for (const routerId of await myRouters()) {
+        const job: QuotaJob = { kind: 'quota', opId: newOpId(), routerId };
+        await quotaQueue.add(`quota-${routerId}`, job, {
+          jobId: `quota-tick-${routerId}`,
+          removeOnComplete: 100,
+          removeOnFail: 200,
+        });
+      }
+    } catch (err) {
+      log('quota-tick: router list fetch failed; will retry next tick', err);
     }
   };
   workers.push(
@@ -204,7 +188,6 @@ async function main(): Promise<void> {
       QUEUES.poll,
       async (job) => {
         if (job.name === 'quota-tick') return enqueueQuotaTick();
-        if (job.name === 'expiry-sweep-tick') return enqueueExpirySweepTick();
         return pollProcessor(job as never);
       },
       { connection, concurrency: 1 },
@@ -240,31 +223,6 @@ async function main(): Promise<void> {
     'quota-tick',
     { every: Number(process.env.QUOTA_INTERVAL_MS ?? 300_000) },
     { name: 'quota-tick', data: {} },
-  );
-  // expiry-sweep-tick is driven by the same dispatcher (enqueueExpirySweepTick).
-  await pollQueue.upsertJobScheduler(
-    'expiry-sweep-tick',
-    { every: Number(process.env.EXPIRY_SWEEP_INTERVAL_MS ?? 900_000) },
-    { name: 'expiry-sweep-tick', data: {} },
-  );
-
-  // --- hotspot expiry sweep (v7 never disables expired users; one job per ----
-  // --- owned router every 15 min, worker-internal `expiry` queue) -------------
-  const expiryQueue = new Queue(QUEUES.expiry, { connection });
-  queues.push(expiryQueue);
-  workers.push(
-    new Worker(
-      QUEUES.expiry,
-      createExpirySweepProcessor({
-        manager,
-        users: new HttpHotspotUserDirectory(apiBase, serviceToken),
-        audit,
-        events,
-        // Never sweep the hub CHR (or any other guarded id).
-        skipRouterIds: [hubRouterId],
-      }),
-      { connection, concurrency: 4 },
-    ),
   );
 
   // --- backups ----------------------------------------------------------------------
@@ -306,22 +264,29 @@ async function main(): Promise<void> {
   );
   const backupQueue = new Queue(QUEUES.backup, { connection });
   queues.push(backupQueue);
-  // per-router staggered daily backups (02:00–05:00) + weekly binary + janitor
-  for (const routerId of await myRouters()) {
-    const exportJob: BackupJob = {
-      kind: 'backup', opId: newOpId(), routerId, backupType: 'export',
-    };
-    await backupQueue.upsertJobScheduler(`backup-${routerId}`, {
-      pattern: backupCronForRouter(routerId),
-    }, { name: 'backup', data: exportJob });
-    const binaryJob: BackupJob = {
-      kind: 'backup', opId: newOpId(), routerId, backupType: 'binary',
-    };
-    await backupQueue.upsertJobScheduler(
-      `backup-bin-${routerId}`,
-      { pattern: '0 3 * * 0' }, // weekly, Sunday 03:00 — bounds FTP + storage load
-      { name: 'backup', data: binaryJob },
-    );
+  // Per-router staggered daily backups (02:00–05:00) + weekly binary + janitor.
+  // The boot-time router list comes from the API: if the API is unreachable
+  // the worker must still start (health monitor + poller rediscover routers
+  // every cycle) — only the per-router backup crons wait for a restart.
+  try {
+    for (const routerId of await myRouters()) {
+      const exportJob: BackupJob = {
+        kind: 'backup', opId: newOpId(), routerId, backupType: 'export',
+      };
+      await backupQueue.upsertJobScheduler(`backup-${routerId}`, {
+        pattern: backupCronForRouter(routerId),
+      }, { name: 'backup', data: exportJob });
+      const binaryJob: BackupJob = {
+        kind: 'backup', opId: newOpId(), routerId, backupType: 'binary',
+      };
+      await backupQueue.upsertJobScheduler(
+        `backup-bin-${routerId}`,
+        { pattern: '0 3 * * 0' }, // weekly, Sunday 03:00 — bounds FTP + storage load
+        { name: 'backup', data: binaryJob },
+      );
+    }
+  } catch (err) {
+    log('backup schedulers: router list fetch failed at boot; continuing without per-router backup crons', err);
   }
   await backupQueue.upsertJobScheduler(
     'backup-janitor',
@@ -330,6 +295,7 @@ async function main(): Promise<void> {
   );
 
   // --- provision ----------------------------------------------------------------------
+  const hubRouterId = process.env.HUB_ROUTER_ID ?? 'hub';
   workers.push(
     new Worker(
       QUEUES.provision,
@@ -341,7 +307,7 @@ async function main(): Promise<void> {
           // deploy-time: the API owns sstpUsername/uuid per router
           const res = await fetch(
             `${apiBase}/internal/worker/routers/${encodeURIComponent(routerId)}/provision-info`,
-            { headers: { authorization: `Bearer ${serviceToken}` } },
+            { headers: { 'x-internal-key': internalKey } },
           );
           if (!res.ok) throw new Error(`provision info failed: HTTP ${res.status}`);
           return (await res.json()) as { sstpUsername: string; uuid: string };
@@ -352,7 +318,7 @@ async function main(): Promise<void> {
               `${apiBase}/internal/worker/routers/${encodeURIComponent(routerId)}/fresh-secrets`,
               {
                 method: 'POST',
-                headers: { authorization: `Bearer ${serviceToken}` },
+                headers: { 'x-internal-key': internalKey },
               },
             );
             if (!res.ok) throw new Error(`fresh secrets failed: HTTP ${res.status}`);
@@ -362,7 +328,7 @@ async function main(): Promise<void> {
         markDecommissioned: async (routerId) => {
           await fetch(`${apiBase}/internal/worker/routers/${encodeURIComponent(routerId)}/decommission`, {
             method: 'POST',
-            headers: { authorization: `Bearer ${serviceToken}` },
+            headers: { 'x-internal-key': internalKey },
           });
         },
         audit,
@@ -390,4 +356,11 @@ async function main(): Promise<void> {
   log(`up (shard ${shardIndex}/${shardCount}, api=${apiBase})`);
 }
 
-void main();
+main().catch((err) => {
+  // Startup failures are logged and exit non-zero so the container's restart
+  // policy applies — never an unhandled rejection. (API unreachability alone
+  // does not reach this handler: every API-dependent boot step above already
+  // degrades gracefully.)
+  log('fatal startup error', err);
+  process.exit(1);
+});
