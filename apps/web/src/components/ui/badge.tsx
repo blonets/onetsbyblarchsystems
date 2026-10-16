@@ -5,9 +5,9 @@ import { cn } from '@/lib/utils';
 const styles: Record<RouterStatus, string> = {
   online: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
   offline: 'bg-slate-500/15 text-slate-300 border-slate-500/30',
-  provisioning: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-  error: 'bg-red-500/15 text-red-300 border-red-500/30',
-  unknown: 'bg-slate-500/15 text-slate-400 border-slate-500/30',
+  pending: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+  suspect: 'bg-red-500/15 text-red-300 border-red-500/30',
+  decommissioned: 'bg-slate-500/15 text-slate-400 border-slate-500/30',
 };
 
 export function StatusBadge({ status }: { status: RouterStatus }) {
