@@ -3,18 +3,18 @@
 import { useQuery } from '@tanstack/react-query';
 import { useTranslations } from 'next-intl';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { apiClient } from '@/lib/api-client';
+import { api } from '@/lib/api-client';
 
 export function StatusCards() {
   const t = useTranslations('dashboard');
   const { data: routers = [] } = useQuery({
     queryKey: ['routers'],
-    queryFn: () => apiClient.listRouters(),
+    queryFn: () => api.listRouters(),
   });
 
   const online = routers.filter((r) => r.status === 'online').length;
-  const offline = routers.filter((r) => r.status === 'offline' || r.status === 'error').length;
-  const provisioning = routers.filter((r) => r.status === 'provisioning').length;
+  const offline = routers.filter((r) => r.status === 'offline').length;
+  const provisioning = routers.filter((r) => r.status === 'pending').length;
 
   const cards = [
     { label: t('total'), value: routers.length, accent: 'text-slate-100' },

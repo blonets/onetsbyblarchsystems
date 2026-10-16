@@ -4,13 +4,13 @@ import { useQuery } from '@tanstack/react-query';
 import { useTranslations } from 'next-intl';
 import { StatusBadge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { apiClient } from '@/lib/api-client';
+import { api } from '@/lib/api-client';
 
 export default function RoutersPage() {
   const t = useTranslations('routers');
   const { data: routers = [], isLoading, isError, refetch } = useQuery({
     queryKey: ['routers'],
-    queryFn: () => apiClient.listRouters(),
+    queryFn: () => api.listRouters(),
   });
 
   return (
@@ -55,15 +55,15 @@ export default function RoutersPage() {
                 <tbody>
                   {routers.map((r) => (
                     <tr key={r.id} className="border-b border-slate-800/60 last:border-0 hover:bg-slate-800/30">
-                      <td className="px-3 py-3 font-mono text-[13px]">{r.identity}</td>
+                      <td className="px-3 py-3 font-mono text-[13px]">{r.identityName}</td>
                       <td className="px-3 py-3 text-slate-300">{r.siteName}</td>
                       <td className="px-3 py-3">
                         <StatusBadge status={r.status} />
                       </td>
                       <td className="px-3 py-3 font-mono text-[13px] text-slate-400">{r.tunnelIp ?? '—'}</td>
-                      <td className="px-3 py-3 text-slate-400">{r.rosVersion ?? '—'}</td>
+                      <td className="px-3 py-3 text-slate-400">{r.routerOsVersion ?? '—'}</td>
                       <td className="px-3 py-3 text-slate-400">
-                        {r.lastSeenAt ? new Date(r.lastSeenAt).toLocaleString() : '—'}
+                        {r.lastSeen ? new Date(r.lastSeen).toLocaleString() : '—'}
                       </td>
                     </tr>
                   ))}
