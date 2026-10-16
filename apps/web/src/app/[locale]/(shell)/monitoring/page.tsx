@@ -19,16 +19,152 @@ import {
   useDeleteAlertRule,
   useDowntime,
   useFleetHealth,
+  useHotspotActiveSessions,
+  useKickHotspotSession,
   useNotificationChannels,
   useRouterMetrics,
   useRouters,
+  useSearchHotspotSessions,
   useUpdateAlertRule,
 } from '@/lib/queries';
-import { formatDateTime, formatDurationMs, formatRate } from '@/lib/format';
+import { formatBytes, formatDateTime, formatDurationMs, formatRate, formatUptime } from '@/lib/format';
 import type { AlertKind, AlertRule, MetricRange } from '@/lib/types';
 
 const ranges: MetricRange[] = ['1h', '24h', '7d'];
 const kinds: AlertKind[] = ['router_offline', 'cpu_high', 'hotspot_spike', 'backup_failed'];
+
+// ---------------------------------------------------------------- active hotspot sessions
+function ActiveSessionsSection({ routerId }: { routerId: string }) {
+  const t = useTranslations('monitoring.active');
+  const tCommon = useTranslations('common');
+  const q = useHotspotActiveSessions(routerId);
+  const kickM = useKickHotspotSession(routerId);
+  const [server, setServer] = useState('all');
+  const [kicking, setKicking] = useState<{ id: string; username: string } | null>(null);
+
+  const rows = q.data ?? [];
+  const servers = [...new Set(rows.map((s) => s.server))];
+  const filtered = server === 'all' ? rows : rows.filter((s) => s.server === server);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex flex-wrap items-center justify-between gap-3">
+          {t('title')}
+          <Field label={t('serverFilter')} className="w-44">
+            <Select value={server} onChange={(e) => setServer(e.target.value)}>
+              <option value="all">{t('allServers')}</option>
+              {servers.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </Select>
+          </Field>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <QueryState
+          isLoading={q.isLoading} isError={q.isError} error={q.error} refetch={() => q.refetch()}
+          isEmpty={filtered.length === 0}
+          empty={<EmptyState title={t('empty')} />}
+        >
+          <Table>
+            <THead>
+              <Th>{t('username')}</Th><Th>{t('ip')}</Th><Th>{t('mac')}</Th><Th>{t('server')}</Th>
+              <Th>{t('uptime')}</Th><Th>{t('download')}</Th><Th>{t('upload')}</Th><Th>{tCommon('actions')}</Th>
+            </THead>
+            <TBody>
+              {filtered.map((s) => (
+                <Tr key={s.id}>
+                  <Td><Mono>{s.username}</Mono></Td>
+                  <Td><Mono>{s.ip}</Mono></Td>
+                  <Td><Mono>{s.mac}</Mono></Td>
+                  <Td><Mono>{s.server}</Mono></Td>
+                  <Td className="tabular-nums text-slate-400">{formatUptime(s.uptimeS)}</Td>
+                  <Td className="tabular-nums text-slate-400">↓ {formatBytes(Number(s.bytesIn))}</Td>
+                  <Td className="tabular-nums text-slate-400">↑ {formatBytes(Number(s.bytesOut))}</Td>
+                  <Td>
+                    <Button
+                      size="sm" variant="ghost" className="text-red-300"
+                      disabled={kickM.isPending}
+                      onClick={() => setKicking({ id: s.id, username: s.username })}
+                    >
+                      {t('kick')}
+                    </Button>
+                  </Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        </QueryState>
+        <ConfirmDialog
+          open={kicking !== null} onClose={() => setKicking(null)}
+          onConfirm={async () => { if (kicking) await kickM.mutateAsync(kicking.id); setKicking(null); }}
+          title={t('kickTitle')}
+          message={t('kickMessage')}
+          confirmLabel={t('kick')}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------- fleet-wide session lookup
+function SessionLookupSection() {
+  const t = useTranslations('monitoring.lookup');
+  const [q, setQ] = useState('');
+  const searchQ = useSearchHotspotSessions(q);
+  const hits = searchQ.data ?? [];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t('title')}</CardTitle>
+        <p className="text-xs text-slate-500">{t('subtitle')}</p>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <Input
+          value={q} onChange={(e) => setQ(e.target.value)} dir="ltr"
+          placeholder={t('placeholder')} className="max-w-md font-mono"
+        />
+        {q.trim().length < 2 ? (
+          <EmptyState title={t('typeMore')} />
+        ) : searchQ.isLoading ? (
+          <p className="py-8 text-center text-sm text-slate-400">…</p>
+        ) : hits.length === 0 ? (
+          <EmptyState title={t('noResults')} />
+        ) : (
+          <div className="flex flex-col gap-3">
+            {hits.map((h) => (
+              <div key={h.routerId} className="rounded-xl border border-slate-700 bg-slate-800/40 p-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="font-mono text-sm font-bold text-slate-100">{h.routerName}</p>
+                  <span className="rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-xs text-emerald-300">
+                    {h.sessions.length} {t('sessions')}
+                  </span>
+                </div>
+                <Table>
+                  <THead>
+                    <Th>{t('username')}</Th><Th>{t('ip')}</Th><Th>{t('mac')}</Th><Th>{t('uptime')}</Th>
+                  </THead>
+                  <TBody>
+                    {h.sessions.map((s) => (
+                      <Tr key={s.id}>
+                        <Td><Mono>{s.username}</Mono></Td>
+                        <Td><Mono>{s.ip}</Mono></Td>
+                        <Td><Mono>{s.mac}</Mono></Td>
+                        <Td className="tabular-nums text-slate-400">{formatUptime(s.uptimeS)}</Td>
+                      </Tr>
+                    ))}
+                  </TBody>
+                </Table>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 function AlertRulesSection() {
   const t = useTranslations('monitoring.alerts');
@@ -169,11 +305,13 @@ export default function MonitoringPage() {
   const tCommon = useTranslations('common');
   const tDown = useTranslations('monitoring.downtime');
   const tFleet = useTranslations('monitoring.fleetHealth');
+  const tActive = useTranslations('monitoring.active');
   const locale = useLocale();
 
   const { routers, selected, setSelected, isLoading } = useRouterPicker();
   const routersQ = useRouters();
   const [range, setRange] = useState<MetricRange>('1h');
+  const [section, setSection] = useState<'overview' | 'active' | 'lookup'>('overview');
 
   const metricsQ = useRouterMetrics(selected, range);
   const downtimeQ = useDowntime(selected || undefined);
@@ -181,6 +319,12 @@ export default function MonitoringPage() {
 
   const routerName = (id: string) => routersQ.data?.find((r) => r.id === id)?.identityName ?? id;
   const downtime = downtimeQ.data ?? [];
+
+  const sectionTabs = [
+    { key: 'overview' as const, label: tActive('tabOverview') },
+    { key: 'active' as const, label: tActive('tabActive') },
+    { key: 'lookup' as const, label: tActive('tabLookup') },
+  ];
 
   return (
     <div className="flex flex-col gap-6">
@@ -205,64 +349,80 @@ export default function MonitoringPage() {
         ))}
       </div>
 
-      {/* per-router charts */}
-      {!selected || isLoading ? (
-        <EmptyState title={t('selectRouter')} />
-      ) : (
-        <>
-          <Tabs tabs={ranges.map((r) => ({ key: r, label: t(`range.${r}`) }))} active={range} onChange={setRange} />
-          {metricsQ.isLoading ? (
-            <Card><CardContent className="py-12 text-center text-sm text-slate-400">{tCommon('loading')}</CardContent></Card>
-          ) : metricsQ.isError ? (
-            <Card><CardContent className="py-12 text-center text-sm text-red-300">{tCommon('error')}</CardContent></Card>
-          ) : (
-            <div className="grid gap-4 xl:grid-cols-2">
-              <CpuMemChart title={t('cpuMem')} data={metricsQ.data ?? []} />
-              <TrafficChart title={t('traffic')} data={metricsQ.data ?? []} formatRate={formatRate} />
-              <div className="xl:col-span-2">
-                <HotspotActiveChart title={t('hotspotActive')} data={metricsQ.data ?? []} />
-              </div>
-            </div>
-          )}
-        </>
+      <Tabs tabs={sectionTabs} active={section} onChange={setSection} />
+
+      {section === 'lookup' && <SessionLookupSection />}
+
+      {section === 'active' && (
+        !selected || isLoading ? (
+          <EmptyState title={t('selectRouter')} />
+        ) : (
+          <ActiveSessionsSection routerId={selected} />
+        )
       )}
 
-      {/* downtime ledger */}
-      <Card>
-        <CardHeader><CardTitle>{tDown('title')}</CardTitle></CardHeader>
-        <CardContent>
-          {downtime.length === 0 ? (
-            <EmptyState title={tDown('empty')} />
+      {section === 'overview' && (
+        <>
+          {/* per-router charts */}
+          {!selected || isLoading ? (
+            <EmptyState title={t('selectRouter')} />
           ) : (
-            <Table>
-              <THead>
-                <Th>{tDown('router')}</Th><Th>{tDown('disconnectedAt')}</Th><Th>{tDown('reconnectedAt')}</Th>
-                <Th>{tDown('duration')}</Th><Th>{tDown('reason')}</Th><Th>{tCommon('status')}</Th>
-              </THead>
-              <TBody>
-                {downtime.map((d) => (
-                  <Tr key={d.id}>
-                    <Td><Mono>{routerName(d.routerId)}</Mono></Td>
-                    <Td className="whitespace-nowrap text-slate-400">{formatDateTime(d.startedAt, locale)}</Td>
-                    <Td className="whitespace-nowrap text-slate-400">
-                      {d.endedAt ? formatDateTime(d.endedAt, locale) : '—'}
-                    </Td>
-                    <Td className="tabular-nums text-slate-300">
-                      {d.durationS != null
-                        ? formatDurationMs(d.durationS * 1000)
-                        : <span className="text-amber-300">{formatDurationMs(Date.now() - new Date(d.startedAt).getTime())}</span>}
-                    </Td>
-                    <Td className="text-slate-500">{d.cause ?? '—'}</Td>
-                    <Td>
-                      {d.endedAt ? <StatusBadge status="online" /> : <span className="rounded-full bg-amber-500/15 px-2.5 py-0.5 text-xs text-amber-300">{tDown('open')}</span>}
-                    </Td>
-                  </Tr>
-                ))}
-              </TBody>
-            </Table>
+            <>
+              <Tabs tabs={ranges.map((r) => ({ key: r, label: t(`range.${r}`) }))} active={range} onChange={setRange} />
+              {metricsQ.isLoading ? (
+                <Card><CardContent className="py-12 text-center text-sm text-slate-400">{tCommon('loading')}</CardContent></Card>
+              ) : metricsQ.isError ? (
+                <Card><CardContent className="py-12 text-center text-sm text-red-300">{tCommon('error')}</CardContent></Card>
+              ) : (
+                <div className="grid gap-4 xl:grid-cols-2">
+                  <CpuMemChart title={t('cpuMem')} data={metricsQ.data ?? []} />
+                  <TrafficChart title={t('traffic')} data={metricsQ.data ?? []} formatRate={formatRate} />
+                  <div className="xl:col-span-2">
+                    <HotspotActiveChart title={t('hotspotActive')} data={metricsQ.data ?? []} />
+                  </div>
+                </div>
+              )}
+            </>
           )}
-        </CardContent>
-      </Card>
+
+          {/* downtime ledger */}
+          <Card>
+            <CardHeader><CardTitle>{tDown('title')}</CardTitle></CardHeader>
+            <CardContent>
+              {downtime.length === 0 ? (
+                <EmptyState title={tDown('empty')} />
+              ) : (
+                <Table>
+                  <THead>
+                    <Th>{tDown('router')}</Th><Th>{tDown('disconnectedAt')}</Th><Th>{tDown('reconnectedAt')}</Th>
+                    <Th>{tDown('duration')}</Th><Th>{tDown('reason')}</Th><Th>{tCommon('status')}</Th>
+                  </THead>
+                  <TBody>
+                    {downtime.map((d) => (
+                      <Tr key={d.id}>
+                        <Td><Mono>{routerName(d.routerId)}</Mono></Td>
+                        <Td className="whitespace-nowrap text-slate-400">{formatDateTime(d.startedAt, locale)}</Td>
+                        <Td className="whitespace-nowrap text-slate-400">
+                          {d.endedAt ? formatDateTime(d.endedAt, locale) : '—'}
+                        </Td>
+                        <Td className="tabular-nums text-slate-300">
+                          {d.durationS != null
+                            ? formatDurationMs(d.durationS * 1000)
+                            : <span className="text-amber-300">{formatDurationMs(Date.now() - new Date(d.startedAt).getTime())}</span>}
+                        </Td>
+                        <Td className="text-slate-500">{d.cause ?? '—'}</Td>
+                        <Td>
+                          {d.endedAt ? <StatusBadge status="online" /> : <span className="rounded-full bg-amber-500/15 px-2.5 py-0.5 text-xs text-amber-300">{tDown('open')}</span>}
+                        </Td>
+                      </Tr>
+                    ))}
+                  </TBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </>
+      )}
 
       <AlertRulesSection />
     </div>

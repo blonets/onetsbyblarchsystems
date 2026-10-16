@@ -7,9 +7,40 @@ import { StatusBadge } from '@/components/ui/badge';
 import { PageHeader } from '@/components/ui/page';
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/states';
 import { Table, TBody, THead, Th, Tr, Td, Mono } from '@/components/ui/table';
-import { useDowntime, useFleetHealth, useRouters } from '@/lib/queries';
+import { useDowntime, useFleetHealth, useRevenueSummary, useRouters } from '@/lib/queries';
 import { useAuditLog } from '@/lib/queries';
 import { formatDateTime, formatDurationMs } from '@/lib/format';
+
+function RevenueTile() {
+  const t = useTranslations('dashboard.revenue');
+  const q = useRevenueSummary();
+  const s = q.data;
+
+  return (
+    <Card>
+      <CardHeader className="pb-1">
+        <CardTitle className="text-xs font-medium text-slate-400">{t('title')}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {q.isLoading ? (
+          <p className="text-3xl font-bold text-slate-600">—</p>
+        ) : (
+          <>
+            <p className="text-3xl font-bold tabular-nums text-amber-300">
+              {s?.revenue != null ? `${s.revenue.toLocaleString()} ${s.currency}` : `0 ${s?.currency ?? ''}`}
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              {t('vouchers')}: <span className="tabular-nums font-semibold text-slate-300">{s?.vouchers ?? 0}</span>
+            </p>
+            {s?.revenue == null && (
+              <p className="mt-2 text-[11px] leading-relaxed text-slate-500">{t('unset')}</p>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function DashboardPage() {
   const t = useTranslations('dashboard');
@@ -66,6 +97,7 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
         ))}
+        <RevenueTile />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
