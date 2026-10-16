@@ -1,0 +1,25 @@
+{
+  "description": "Zero-heavy-dependency TypeScript client for the MikroTik RouterOS API (binary protocol)",
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
+  "license": "UNLICENSED",
+  "main": "dist/index.js",
+  "name": "@mtk/ros-api",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "types": "dist/index.d.ts",
+  "version": "0.1.0",
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "@mtk/types": "workspace:*"
+  }
+}

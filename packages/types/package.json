@@ -1,0 +1,1 @@
+{"author":"","description":"Shared DTOs for the MikroTik fleet platform","exports":{".":"./dist/index.js","./package.json":"./package.json"},"license":"UNLICENSED","main":"dist/index.js","name":"@mtk/types","scripts":{"build":"tsc -p tsconfig.json","typecheck":"tsc -p tsconfig.json --noEmit"},"types":"dist/index.d.ts","version":"0.1.0"}

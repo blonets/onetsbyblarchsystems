@@ -1,0 +1,28 @@
+# dependencies
+node_modules
+
+# build outputs
+dist
+.next
+build
+out
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# env files — NEVER commit real secrets; .env.example is the only env file tracked
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# turbo
+.turbo
