@@ -252,8 +252,8 @@ export class ProvisioningService {
     });
 
     const fetchCommand =
-      `/tool fetch mode=https address=${this.config.panelHost} ` +
-      `src-path=/api/v1/onboard/${issued.token}/onboard.rsc dst-path=onboard.rsc; /import onboard.rsc`;
+      `/tool fetch mode=https url="https://${this.config.panelHost}/api/v1/onboard/${issued.token}/onboard.rsc" ` +
+      `dst-path=onboard.rsc check-certificate=no; :delay 2s; /import onboard.rsc`;
     return {
       token: issued.token,
       expiresAt: issued.expiresAt,

@@ -89,7 +89,7 @@ export function buildOnboardScript(input: OnboardScriptInput): string {
     `:local ver [/system resource get version];`,
     `:local board [/system resource get board-name];`,
     `:local payload ("{\\"uuid\\":\\"${uuid}\\",\\"version\\":\\"" . $ver . "\\",\\"board\\":\\"" . $board . \\"\\"}");`,
-    `/tool fetch mode=https address="${panelHost}" src-path="${callbackPath}" http-method=post http-data=$payload dst-path=panel-callback.txt;`,
+    `/tool fetch mode=https url="https://${panelHost}${callbackPath}" http-method=post http-data=$payload dst-path=panel-callback.txt check-certificate=no;`,
     `:log info "panel-onboard: callback sent";`,
     ``,
   ];
