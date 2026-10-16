@@ -262,9 +262,44 @@ router.
 | 8 Downtime ledger | ☐ NOT YET RUN | | |
 | 9 Backup/restore | 🟡 PARTIAL (create/export only) | 2026-10-16 | |
 | 10 Watchdog self-heal | ☐ NOT YET RUN | | |
-| 11 Deployment (Dokploy) | ⛔ BLOCKED (see below) | 2026-10-16 | |
+| 11 Deployment (Dokploy) | ⛔ BLOCKED (both crash causes fixed + locally proven 2026-10-16; vault decision + redeploy pending — see below) | 2026-10-16 | |
 
 No item may be marked done without pasted command output as evidence.
+
+---
+
+## Local stack verification — 2026-10-16
+
+> 🖥️ **LOCAL ONLY — this is NOT production evidence.** The full stack was
+> run as local processes against apt-installed PostgreSQL 16 +
+> TimescaleDB and Redis (Docker image pulls were unavailable in the
+> build sandbox). Nothing here marks any panel-path checklist item
+> above as run; it proves the code and the deployment fixes before
+> they ship.
+
+- **Migrations:** all 3 migrations applied cleanly via a real
+  `prisma migrate deploy` on a fresh TimescaleDB — 25 tables,
+  4 hypertables, the `metric_traffic_1h` continuous aggregate,
+  6 background jobs. Production root cause found: `0002_timescale`
+  created its continuous aggregate `WITH DATA`, which cannot run
+  inside Prisma's per-migration transaction (P3018 on apply → the
+  migration is recorded failed → P3009 on every later deploy). Fixed
+  by creating the aggregate `WITH NO DATA`. The exact production
+  state was then simulated locally and the recovery
+  (`migrate resolve --rolled-back 0002_timescale` + deploy of the
+  fixed migration) was proven end-to-end; the api entrypoint now has
+  an env-gated one-shot resolve fallback (`PRISMA_RESOLVE_ROLLED_BACK`,
+  default-off).
+- **API:** boots; `GET /health` → 200.
+- **Internal contract:** `GET /internal/worker/routers` → 401 without
+  a key and with a wrong key; `{"routerIds":[]}` with the correct
+  key; an unknown router's endpoint → 404 (the worker maps it to
+  `UnknownRouterError`).
+- **Worker:** boots against the api and polls; when the api was
+  killed mid-run the worker logged the `ECONNREFUSED` and kept
+  cycling — **no crash** (the exact failure that crash-looped the
+  production worker) — and recovered silently when the api returned.
+- **Web:** the standalone build serves `/en` with 200.
 
 ---
 
@@ -276,13 +311,27 @@ No item may be marked done without pasted command output as evidence.
   `api.onetsbyblarch.online` → `api:3001` are configured, with Traefik
   routing + Let's Encrypt certificate labels in place and both services
   joined to `dokploy-network`.
-- ⛔ **BLOCKED — the platform is NOT yet accepted live.** The `api`
-  container crash-loops: its entrypoint runs `prisma migrate deploy`, which
-  fails with **P3009** because migration `0002_timescale` failed on its
-  first run and is now recorded as failed in the production database. The
-  `worker` container also crash-loops on startup (internal API
-  contract/config — see ARCHITECTURE.md, "Worker ↔ API internal contract").
-- Until both are fixed and the stack redeploys healthy, every panel-path
+- ⛔ **BLOCKED — the platform is NOT yet accepted live (production has
+  not been redeployed).** Both original crash causes were root-caused,
+  fixed in the working copy, and proven on a local stack on 2026-10-16
+  (see "Local stack verification" above): the `0002_timescale`
+  migration failure (continuous aggregate created `WITH DATA` inside
+  Prisma's per-migration transaction → P3018, recorded failed, then
+  P3009 on every deploy) and the worker crash-loop (missing
+  `/internal/worker/*` endpoints + auth mismatch + unhandled
+  rejection). The remaining blocker chain, in order: (1) **the vault
+  is in-memory only** — no persistent `VaultPort` implementation
+  exists, so router passwords would be lost on any api restart; a
+  persistent implementation must land first (decision pending with
+  the owner: AES-256-GCM encrypted Postgres vault vs a HashiCorp
+  Vault service); (2) the deploy batch — compose env fixes
+  (`PANEL_PUBLIC_HOST` missing from the api env, a `getOrThrow` that
+  would crash the api at boot; CORS name mismatch: the code reads
+  `CORS_ORIGINS`, the compose sets `CORS_ORIGIN`), push, Dokploy env
+  (incl. `INTERNAL_API_KEY` and the one-shot
+  `PRISMA_RESOLVE_ROLLED_BACK` for the failed-migration record), a
+  single redeploy, and domain verification.
+- Until the redeploy lands healthy, every panel-path
   item above (5, the panel halves of 6/7/9, 8, and item 10's panel-side
   assertions) remains blocked, and the 7-day soak on ≥3 routers cannot
   start.

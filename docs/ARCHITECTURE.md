@@ -163,13 +163,20 @@ send this header on every internal call, and must be configured with
 `API_BASE_URL` pointing at the internal api service (e.g. `http://api:3001`
 inside the compose network) — never a localhost default in deployment.
 
-> **Implementation status (discovered 2026-10-16):** only
-> `POST /internal/commands/results` exists on the API side. The
-> `/internal/worker/*` endpoints above existed only implicitly in the worker
-> code and were never implemented in `apps/api`; the worker also currently
-> authenticates with `Authorization: Bearer $WORKER_SERVICE_TOKEN`, which the
-> `InternalGuard` does not accept. Implementing the missing endpoints and
-> aligning the worker to the `x-internal-key` scheme is tracked Phase 1 work.
+> **Implementation status (updated 2026-10-16):** IMPLEMENTED — all six
+> `/internal/worker/*` endpoints now live in `apps/api/src/internal`,
+> reusing the existing routers / provisioning / audit / vault services
+> (no parallel implementations); the worker sends `x-internal-key` on
+> every internal call and treats API failures as retryable (see Failure
+> semantics below). Builds green (worker tests 89 passed, api tests 58
+> passed) and verified on a full local stack test the same day: 401
+> without/with a wrong key, the router list with the key, 404 for an
+> unknown router, and the worker surviving a killed API without
+> crashing. Production proof is pending the deploy batch. (History:
+> the contract was discovered missing on 2026-10-16, when the
+> production worker crash-looped against endpoints that existed only
+> in the worker code and authenticated with a Bearer token the
+> `InternalGuard` never accepted.)
 
 **Failure semantics.** Registry/API fetch failures in the worker are
 **retryable**: the worker logs the failure and retries on the next poll cycle
@@ -305,6 +312,16 @@ Start: 4 replicas → 1000 routers with headroom.
 - **Per-router unique credentials**: SSTP username/password and API password are
   generated per router (32+ chars), stored as references (Vault/KMS) — never plaintext
   in the DB, never in git, never in docs.
+
+> **Vault implementation status (2026-10-16) — PRODUCTION BLOCKER:** the
+> "Vault/KMS" above is currently only an interface (`VaultPort`). The sole
+> implementation that exists is `InMemoryVault` (dev/test): secret values
+> live in the api process's memory and are **lost on any restart**, which
+> would orphan every credential reference in the DB and strand the fleet.
+> A persistent implementation must land before production deployment —
+> decision pending between an AES-256-GCM encrypted Postgres-backed vault
+> (master key in the `VAULT_MASTER_KEY` env var) and a HashiCorp Vault
+> service in the compose.
 - **Network**: management only inside the tunnel; site router input firewall accepts
   API (8728) only from `10.200.0.0/16`; SSTP server input accepts 443 from anywhere
   (clients roam) but authentication is per-router strong secret.

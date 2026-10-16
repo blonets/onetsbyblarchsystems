@@ -27,12 +27,52 @@ subscribe; they never patch existing modules.
   system backup create + config export — all PASS.
 - Phase 1 code (NestJS modules, worker jobs, Arabic dashboard) is written
   and CI-green — panel-driven end-to-end verification is still open (below).
+- Migration `0002_timescale` failure root-caused + fixed (2026-10-16):
+  its continuous aggregate was created `WITH DATA`, which cannot run
+  inside Prisma's per-migration transaction (P3018 on apply → P3009
+  blocking every later deploy). Fixed by creating the aggregate
+  `WITH NO DATA`; all 3 migrations applied cleanly via a real
+  `prisma migrate deploy` on a fresh TimescaleDB (25 tables,
+  4 hypertables, the aggregate, 6 background jobs), and the exact
+  production failure state (P3018 → P3009) was simulated locally with
+  the recovery (`migrate resolve --rolled-back` + deploy of the fixed
+  migration) proven end-to-end. The api entrypoint now carries an
+  env-gated one-shot resolve fallback (`PRISMA_RESOLVE_ROLLED_BACK`,
+  default-off).
+- Full local stack test passed (2026-10-16): api boots + `/health` 200;
+  internal endpoints return 401 without/with a wrong key, the router
+  list with the key, 404 for an unknown router; the worker boots
+  against the api, survives the api being killed (logs + retries, no
+  crash), and recovers when it returns; web standalone serves `/en`
+  200. LOCAL evidence only — production is not redeployed yet (gate
+  below).
 
 **Open — everything remaining between here and Phase 1 exit**
 - [ ] Production deployment accepted (deployment gate, Phase 1 exit) —
-      blocked-by: failed migration `0002_timescale` (Prisma P3009) stops
-      the api, and the worker crash-loops on the internal contract below.
-- [ ] Worker↔API internal contract implemented (Phase 1 scope item 7).
+      both original blockers are fixed and proven on a local stack
+      (2026-10-16), but production has NOT been redeployed: the gate is
+      now blocked on the vault implementation (below) + the deploy
+      batch (below).
+- [x] Worker↔API internal contract implemented (Phase 1 scope item 7) —
+      implemented in the working copy 2026-10-16 (new
+      `apps/api/src/internal` module, 6 endpoints; worker auth unified
+      on `x-internal-key`; resilience fixed) and verified on the local
+      stack test. Push + production-live proof ride the deploy batch
+      (the Phase 1 *exit* criterion stays open until then).
+- [ ] Persistent vault implementation — **production blocker**: the
+      only `VaultPort` implementation is `InMemoryVault`, so router
+      passwords would be lost on any api restart. Decision pending
+      (owner): AES-256-GCM encrypted Postgres vault (`VAULT_MASTER_KEY`
+      env) vs a HashiCorp Vault service. Must land before the deploy
+      batch.
+- [ ] Deploy batch (one push, one redeploy): compose env gaps found by
+      the 2026-10-16 env-contract audit — `PANEL_PUBLIC_HOST` missing
+      from the api env (`getOrThrow`: the api would crash at boot;
+      value = `api.onetsbyblarch.online`) and the CORS name mismatch
+      (code reads `CORS_ORIGINS`, compose sets `CORS_ORIGIN`) — plus
+      `INTERNAL_API_KEY` + worker `API_BASE_URL` (already added to the
+      compose in the working copy), Dokploy env values incl. the
+      one-shot `PRISMA_RESOLVE_ROLLED_BACK`, then domain verification.
 - [ ] Panel-driven end-to-end verification: hotspot round-trip incl. quota
       enforcer; firewall safe-apply rollback demonstration; monitoring
       persistence + Socket.IO live proof; downstream device discovered via
@@ -127,10 +167,24 @@ subscribe; they never patch existing modules.
    `Bearer $WORKER_SERVICE_TOKEN` and defaults to `http://localhost:3000`.
    The worker must also treat API fetch failures as retryable (log + retry
    on the next poll cycle), never crash the process.
+   (status 2026-10-16: IMPLEMENTED in the working copy — new
+   `apps/api/src/internal` module with all six endpoints reusing the
+   routers/provisioning/audit/vault services; worker aligned to
+   `x-internal-key`; fetch failures made retryable at the
+   health-monitor/poller level. Builds green; worker tests 89 passed,
+   api tests 58 passed; verified on the local stack test, including
+   the worker surviving a killed api. Push + production proof pending
+   the deploy batch.)
 8. **Migration discipline** — every Prisma migration is proven against a
    fresh TimescaleDB (local Docker) before it ships. A migration that fails
    in production blocks all subsequent deploys (Prisma P3009) until it is
    resolved, so migrations are rehearsed, never first-run in production.
+   (status 2026-10-16: this discipline exists because of a real failure —
+   `0002_timescale` shipped unrehearsed and failed in production: its
+   continuous aggregate was created `WITH DATA`, illegal inside Prisma's
+   per-migration transaction. Root-caused, fixed with `WITH NO DATA`,
+   and the full migration set + the P3009 recovery procedure proven
+   against a fresh TimescaleDB locally the same day.)
 9. **Hub certificate renewal** — the SSTP hub's Let's Encrypt certificate
    (expires 2027-01-14) renews automatically: renewal script + systemd
    timer for the Dokploy VPS. (status 2026-10-16: automation files written;
@@ -174,17 +228,21 @@ subscribe; they never patch existing modules.
       and polls routers through `/internal/worker/*` with unified
       internal-key auth, and rides out an API outage by retrying — no
       crash loop.
-      (open — the endpoints are not yet implemented in the API and the
-      auth mismatch is identified; discovered 2026-10-16)
+      (implemented + locally verified 2026-10-16 — the endpoints answer
+      correctly in the local stack test and the worker rode out a killed
+      api without crashing; production-live proof pending the deploy
+      batch, which is gated on the vault implementation)
 - [ ] Deployment gate: the platform is live via the Dokploy compose on its
       production domains (`admin.` / `api.onetsbyblarch.online`) with
       valid TLS, api `/health` green, worker stable across poll cycles,
       and all migrations applied cleanly on a fresh database.
-      (blocked-by — the compose stack builds and deploys, the domains are
-      registered, and Traefik labels with the letsencrypt resolver are
-      injected, but the platform is NOT yet live: the api is stopped by
-      failed migration `0002_timescale` (Prisma P3009) and the worker
-      crash-loops on the missing internal contract)
+      (blocked-by — production NOT yet redeployed. The two original
+      causes are fixed and locally proven (migration `0002_timescale`
+      root-caused + fixed; internal contract implemented; full local
+      stack test passed 2026-10-16). Remaining blockers: the vault is
+      in-memory only — a production blocker with the implementation
+      decision pending — and the deploy batch itself: compose env
+      fixes + push + Dokploy env + one redeploy + domain verification)
 
 ## Phase 2 — Monetization & scale-out (NEW modules, no rewrites)
 
