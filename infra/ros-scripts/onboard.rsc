@@ -53,17 +53,24 @@
 /system note set note=("platform-uuid=" . $UUID . "\nOnboarded by the fleet platform. Do not delete the platform-api user, the sstp-to-hub interface, or the platform-watchdog schedule.")
 
 # ------------------------------------------------- SSTP client (spoke) ----
+# Hub uses Let's Encrypt (vpn.onetsbyblarch.online) — verify the server cert.
+# Root YR (valid to 2045) is imported once; no per-renewal distribution needed.
 :local IFNAME "sstp-to-hub"
+/tool fetch url="https://letsencrypt.org/certs/gen-y/root-yr.pem" dst-path="root-yr.pem"
+/certificate import file-name="root-yr.pem" passphrase=""
+:local ROOTID [/certificate find common-name="Root YR"]
+:if ([:len $ROOTID] > 0) do={ /certificate set $ROOTID trusted=yes }
 :if ([:len [/interface sstp-client find name=$IFNAME]] > 0) do={
     /interface sstp-client remove [find name=$IFNAME]
 }
 /interface sstp-client add name=$IFNAME connect-to=$HUB_HOST port=443 \
     user=$SSTP_USER password=$SSTP_PASS profile=default-encryption \
-    authentication=mschap2 verify-server-certificate=no \
+    authentication=mschap2 verify-server-certificate=yes \
+    verify-server-address-from-certificate=yes \
     pfs=yes tls-version=only-1.2 keepalive-timeout=60 \
     dial-on-demand=no add-default-route=no disabled=no \
     comment=("platform-uuid=" . $UUID)
-:log info "platform onboard: SSTP client installed"
+:log info "platform onboard: SSTP client installed (cert verified)"
 
 # --------------------------------------- platform API group + user ----
 # Least privilege: read+write (hotspot/firewall/queue management), test

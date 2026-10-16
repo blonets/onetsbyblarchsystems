@@ -30,14 +30,22 @@
     :log info "platform: removed previous SSTP client"
 }
 
-# Security trade-off (documented): the hub uses a self-signed CA, so the spoke
-# does not verify the server certificate (verify-server-certificate=no). The
-# tunnel is still TLS-encrypted and the PPP layer authenticates with the
-# per-router mschap2 username/password. If the hub ever gets a publicly-trusted
-# certificate, flip verify-server-certificate=yes.
+# Security: the hub uses a publicly-trusted Let's Encrypt certificate for
+# vpn.onetsbyblarch.online, so the spoke VERIFIES the server certificate.
+# Root YR (https://letsencrypt.org/certs/gen-y/root-yr.pem, valid to 2045)
+# is imported and trusted below — one-time, no renewal needed.
+/tool fetch url="https://letsencrypt.org/certs/gen-y/root-yr.pem" dst-path="root-yr.pem"
+/certificate import file-name="root-yr.pem" passphrase=""
+:local ROOTID [/certificate find common-name="Root YR"]
+:if ([:len $ROOTID] > 0) do={
+    /certificate set $ROOTID trusted=yes
+    :log info "platform: Root YR imported and trusted"
+}
+
 /interface sstp-client add name=$IFNAME connect-to=$HUB_HOST port=443 \
     user=$SSTP_USER password=$SSTP_PASS profile=default-encryption \
-    authentication=mschap2 verify-server-certificate=no \
+    authentication=mschap2 verify-server-certificate=yes \
+    verify-server-address-from-certificate=yes \
     pfs=yes tls-version=only-1.2 keepalive-timeout=60 \
     dial-on-demand=no add-default-route=no disabled=no \
     comment=("platform-uuid=" . $UUID)
