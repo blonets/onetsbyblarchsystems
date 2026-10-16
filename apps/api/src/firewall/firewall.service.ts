@@ -5,6 +5,7 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import {
   addressListAdd,
   addressListDisable,
@@ -30,11 +31,12 @@ import {
   natRuleRemove,
   natRuleSet,
 } from '@mtk/ros-api';
-import type { FirewallRule } from '@mtk/types';
+import { newOpId, type FirewallJournalEntry, type FirewallRule } from '@mtk/types';
 import type { CurrentUserType } from '../common/types.js';
 import { DB_PORT, type DbPort, type NewFirewallRule } from '../db/database.port.js';
 import type { FirewallRuleRow } from '../db/rows.js';
 import { RouterCommandsService, type EnqueuedCommand } from '../commands/commands.service.js';
+import { FirewallJournalService } from './firewall-journal.service.js';
 import type {
   CreateFirewallRuleDto,
   ListFirewallRulesQuery,
@@ -61,12 +63,17 @@ const SAFE_APPLY_VERIFY_MS = 60_000;
  * - Address-list entries are stored in the same mirror table
  *   (`table='address-list'`, `chain`=list name, `srcAddress`=entry); they have
  *   no device-side ordering, so `move` is rejected for them.
+ * - Rollback journaling: EVERY mutation writes a FirewallJournal entry BEFORE
+ *   applying (status pending → applied once enqueued). Rollback restores the
+ *   before-snapshot; rules created by the journaled op are REVOKED
+ *   (revoked=true, disabled) — never hard-deleted.
  */
 @Injectable()
 export class FirewallService {
   constructor(
     @Inject(DB_PORT) private readonly db: DbPort,
     private readonly commands: RouterCommandsService,
+    private readonly journals: FirewallJournalService,
   ) {}
 
   private needDeviceId(row: FirewallRuleRow): string {
@@ -94,8 +101,16 @@ export class FirewallService {
     const where: Record<string, unknown> = { routerId };
     if (q.table) where.table = q.table;
     if (q.chain) where.chain = q.chain;
+    // Revoked rules are hidden by default (soft-deleted by rollback); the UI
+    // can still list them with ?includeRevoked=true for audit.
+    if (!q.includeRevoked) where.revoked = false;
     const rows = await this.db.firewallRules.findMany({ where, orderBy: { order: 'asc' } });
     return rows.map(toDto);
+  }
+
+  async listJournals(routerId: string, limit?: number): Promise<FirewallJournalEntry[]> {
+    await this.commands.requireRouter(routerId);
+    return this.journals.list(routerId, limit);
   }
 
   async createRule(routerId: string, dto: CreateFirewallRuleDto, actor?: CurrentUserType) {
@@ -141,23 +156,52 @@ export class FirewallService {
       disabled: dto.disabled ?? false,
       managed: true,
     };
-    const row = await this.db.firewallRules.create(data);
+    // Journal BEFORE applying: the mirror id is allocated up-front so the
+    // journal can reference the row it is about to create.
+    const opId = dto.opId ?? newOpId();
+    const newId = randomUUID();
+    const sentences = [this.addSentence(dto, placeBefore)];
+    const journal = await this.journals.record({
+      routerId,
+      opId,
+      action: 'firewall.rule.create',
+      table: dto.table,
+      chain: dto.chain,
+      ruleId: null,
+      before: [],
+      createdRuleIds: [newId],
+      sentences,
+    });
+    const row = await this.db.firewallRules.create({ ...data, id: newId } as NewFirewallRule & { id: string });
     const enq = await this.commands.enqueueRos({
       routerId,
       action: `firewall.rule.create`,
-      sentences: [this.addSentence(dto, placeBefore)],
-      opId: dto.opId,
+      sentences,
+      opId,
       actorId: actor?.sub,
-      after: { table: dto.table, chain: dto.chain, action: dto.action },
+      after: { table: dto.table, chain: dto.chain, action: dto.action, journalId: journal.id },
       entity: { table: 'firewall', id: row.id },
       safeApply: this.safeApplyFor(dto.table),
     });
-    return { rule: toDto(row), ...enq };
+    await this.journals.markApplied(journal.id);
+    return { rule: toDto(row), journalId: journal.id, ...enq };
   }
 
   async updateRule(routerId: string, id: string, dto: UpdateFirewallRuleDto, actor?: CurrentUserType) {
     const row = await this.ruleOrThrow(routerId, id);
     const deviceId = this.needDeviceId(row);
+    const opId = dto.opId ?? newOpId();
+    const sentences = [this.setSentence(row, dto, deviceId)];
+    const journal = await this.journals.record({
+      routerId,
+      opId,
+      action: 'firewall.rule.update',
+      table: row.table,
+      chain: row.chain,
+      ruleId: id,
+      before: [{ ...row }],
+      sentences,
+    });
     const updated = await this.db.firewallRules.update(
       { id },
       Object.fromEntries(
@@ -180,17 +224,19 @@ export class FirewallService {
     const enq = await this.commands.enqueueRos({
       routerId,
       action: 'firewall.rule.update',
-      sentences: [this.setSentence(row, dto, deviceId)],
-      opId: dto.opId,
+      sentences,
+      opId,
       actorId: actor?.sub,
       before: row,
+      after: { journalId: journal.id },
       entity: { table: 'firewall', id },
       safeApply: this.safeApplyFor(row.table),
     });
-    return { rule: toDto(updated), ...enq };
+    await this.journals.markApplied(journal.id);
+    return { rule: toDto(updated), journalId: journal.id, ...enq };
   }
 
-  async deleteRule(routerId: string, id: string, opId: string | undefined, actor?: CurrentUserType): Promise<EnqueuedCommand> {
+  async deleteRule(routerId: string, id: string, opIdIn: string | undefined, actor?: CurrentUserType): Promise<EnqueuedCommand & { journalId: string }> {
     const row = await this.ruleOrThrow(routerId, id);
     if (row.comment?.startsWith('panel-proxy:')) {
       throw new BadRequestException(
@@ -198,34 +244,62 @@ export class FirewallService {
       );
     }
     const deviceId = this.needDeviceId(row);
+    const opId = opIdIn ?? newOpId();
+    const sentences = [this.removeSentence(row.table, deviceId)];
+    const journal = await this.journals.record({
+      routerId,
+      opId,
+      action: 'firewall.rule.delete',
+      table: row.table,
+      chain: row.chain,
+      ruleId: id,
+      before: [{ ...row }],
+      sentences,
+    });
     await this.db.firewallRules.delete({ id });
-    return this.commands.enqueueRos({
+    const enq = await this.commands.enqueueRos({
       routerId,
       action: 'firewall.rule.delete',
-      sentences: [this.removeSentence(row.table, deviceId)],
+      sentences,
       opId,
       actorId: actor?.sub,
       before: row,
+      after: { journalId: journal.id },
       safeApply: this.safeApplyFor(row.table),
     });
+    await this.journals.markApplied(journal.id);
+    return { journalId: journal.id, ...enq };
   }
 
-  async setRuleDisabled(routerId: string, id: string, disabled: boolean, opId: string | undefined, actor?: CurrentUserType) {
+  async setRuleDisabled(routerId: string, id: string, disabled: boolean, opIdIn: string | undefined, actor?: CurrentUserType) {
     const row = await this.ruleOrThrow(routerId, id);
     const deviceId = this.needDeviceId(row);
+    const opId = opIdIn ?? newOpId();
+    const sentences = [this.toggleSentence(row.table, deviceId, disabled)];
+    const journal = await this.journals.record({
+      routerId,
+      opId,
+      action: disabled ? 'firewall.rule.disable' : 'firewall.rule.enable',
+      table: row.table,
+      chain: row.chain,
+      ruleId: id,
+      before: [{ ...row }],
+      sentences,
+    });
     const updated = await this.db.firewallRules.update({ id }, { disabled });
     const enq = await this.commands.enqueueRos({
       routerId,
       action: disabled ? 'firewall.rule.disable' : 'firewall.rule.enable',
-      sentences: [this.toggleSentence(row.table, deviceId, disabled)],
+      sentences,
       opId,
       actorId: actor?.sub,
       before: { disabled: row.disabled },
-      after: { disabled },
+      after: { disabled, journalId: journal.id },
       entity: { table: 'firewall', id },
       safeApply: this.safeApplyFor(row.table),
     });
-    return { rule: toDto(updated), ...enq };
+    await this.journals.markApplied(journal.id);
+    return { rule: toDto(updated), journalId: journal.id, ...enq };
   }
 
   /**
@@ -271,6 +345,18 @@ export class FirewallService {
       newOrder = [...siblings.filter((r) => r.order <= row.order), ...after, row];
     }
 
+    // Journal BEFORE applying: snapshot the whole chain (order is chain-wide).
+    const opId = dto.opId ?? newOpId();
+    const journal = await this.journals.record({
+      routerId,
+      opId,
+      action: 'firewall.rule.move',
+      table: row.table,
+      chain: row.chain,
+      ruleId: id,
+      before: [row, ...siblings].map((r) => ({ ...r })),
+      sentences,
+    });
     for (let i = 0; i < newOrder.length; i++) {
       if (newOrder[i].order !== i) await this.db.firewallRules.update({ id: newOrder[i].id }, { order: i });
     }
@@ -278,14 +364,171 @@ export class FirewallService {
       routerId,
       action: 'firewall.rule.move',
       sentences,
-      opId: dto.opId,
+      opId,
       actorId: actor?.sub,
       before: { order: row.order },
-      after: { order: newOrder.indexOf(row) },
+      after: { order: newOrder.indexOf(row), journalId: journal.id },
       entity: { table: 'firewall', id },
       safeApply: this.safeApplyFor(row.table),
     });
-    return { rule: toDto({ ...row, order: newOrder.indexOf(row) }), ...enq };
+    await this.journals.markApplied(journal.id);
+    return { rule: toDto({ ...row, order: newOrder.indexOf(row) }), journalId: journal.id, ...enq };
+  }
+
+  // ------------------------------------------------------------- rollback --
+
+  /**
+   * Roll back a journaled firewall change.
+   *
+   * - Snapshotted rules are restored to their before-state (mirror + device).
+   * - Rules the journaled op CREATED are REVOKED (`revoked: true`, disabled
+   *   on-device) — rollback never hard-deletes a journaled rule.
+   * - A rule deleted after the journal is recreated from the snapshot.
+   *
+   * The rollback itself is audited as `firewall.rollback` (one command);
+   * it is not journaled (no recursive journals).
+   */
+  async rollbackJournal(routerId: string, journalId: string, actor?: CurrentUserType) {
+    await this.commands.requireRouter(routerId);
+    const journal = await this.journals.get(routerId, journalId);
+    if (!journal) throw new NotFoundException(`firewall journal ${journalId} not found`);
+    if (journal.status !== 'applied') {
+      throw new UnprocessableEntityException(
+        `journal ${journalId} has status '${journal.status}' — only 'applied' journals can be rolled back`,
+      );
+    }
+    const before = (Array.isArray(journal.before) ? journal.before : []) as FirewallRuleRow[];
+    const createdIds = (Array.isArray(journal.createdRuleIds) ? journal.createdRuleIds : []) as string[];
+    const opId = newOpId();
+    const sentences: string[][] = [];
+    let restored = 0;
+    let revoked = 0;
+
+    if (journal.action === 'firewall.rule.move') {
+      restored = await this.rollbackMove(routerId, before, sentences);
+    } else {
+      for (const snap of before) {
+        const existing = await this.db.firewallRules.findUnique({ id: snap.id }).catch(() => null);
+        if (existing) {
+          const { id: _drop, routerId: _dropRouter, ...fields } = snap;
+          await this.db.firewallRules.update({ id: snap.id }, { ...fields, revoked: false });
+          const deviceId = existing.mikrotikId ?? snap.mikrotikId;
+          if (deviceId) {
+            sentences.push(this.setSentenceFromRow({ ...snap, mikrotikId: deviceId }, deviceId));
+          }
+          restored++;
+        } else {
+          // Deleted after the journal — recreate mirror + device rule.
+          const { ...fields } = snap;
+          await this.db.firewallRules.create({ ...fields } as NewFirewallRule & { id: string });
+          sentences.push(this.addSentenceFromRow(snap));
+          restored++;
+        }
+      }
+    }
+
+    // Rules created by the journaled op: revoke, never hard-delete.
+    for (const createdId of createdIds) {
+      const row = await this.db.firewallRules.findUnique({ id: createdId }).catch(() => null);
+      if (!row || row.revoked) continue;
+      const updated = await this.db.firewallRules.update({ id: createdId }, { revoked: true, disabled: true });
+      if (updated.mikrotikId) {
+        sentences.push(this.toggleSentence(updated.table, updated.mikrotikId, true));
+      }
+      revoked++;
+    }
+
+    const enq = await this.commands.enqueueRos({
+      routerId,
+      action: 'firewall.rollback',
+      sentences,
+      opId,
+      actorId: actor?.sub,
+      before: { journalId, action: journal.action },
+      after: { restored, revoked },
+      safeApply: journal.table === 'filter' ? { verifyAfterMs: SAFE_APPLY_VERIFY_MS } : undefined,
+    });
+    await this.journals.markRolledBack(journal.id);
+    return { journalId: journal.id, restored, revoked, ...enq };
+  }
+
+  /**
+   * Restore a chain's rule order from a move journal's before-snapshot.
+   * Mirror: rewrite `order`. Device: walk the desired order back-to-front,
+   * moving each rule before its successor (reconstructs the exact order;
+   * the last rule needs no move).
+   */
+  private async rollbackMove(
+    routerId: string,
+    before: FirewallRuleRow[],
+    sentences: string[][],
+  ): Promise<number> {
+    const ordered = [...before].sort((a, b) => a.order - b.order);
+    let restored = 0;
+    for (const snap of ordered) {
+      const existing = await this.db.firewallRules.findUnique({ id: snap.id }).catch(() => null);
+      if (!existing) continue; // rule deleted after the move — order restore skips it
+      if (existing.order !== snap.order) {
+        await this.db.firewallRules.update({ id: snap.id }, { order: snap.order });
+        restored++;
+      }
+    }
+    for (let i = ordered.length - 2; i >= 0; i--) {
+      const rule = ordered[i];
+      const successor = ordered[i + 1];
+      const existing = await this.db.firewallRules.findUnique({ id: rule.id }).catch(() => null);
+      const succExisting = await this.db.firewallRules.findUnique({ id: successor.id }).catch(() => null);
+      const deviceId = existing?.mikrotikId ?? rule.mikrotikId;
+      const succDeviceId = succExisting?.mikrotikId ?? successor.mikrotikId;
+      if (deviceId && succDeviceId) {
+        sentences.push(this.moveSentence(rule.table, deviceId, succDeviceId));
+      }
+    }
+    return restored;
+  }
+
+  /** Rebuild an add sentence from a mirror-row snapshot (rollback path). */
+  private addSentenceFromRow(row: FirewallRuleRow): string[] {
+    return this.addSentence(
+      {
+        table: row.table,
+        chain: row.chain,
+        action: row.action,
+        protocol: row.protocol ?? undefined,
+        srcAddress: row.srcAddress ?? undefined,
+        dstAddress: row.dstAddress ?? undefined,
+        srcPort: row.srcPort ?? undefined,
+        dstPort: row.dstPort ?? undefined,
+        inInterface: row.inInterface ?? undefined,
+        outInterface: row.outInterface ?? undefined,
+        toAddresses: row.toAddresses ?? undefined,
+        toPorts: row.toPorts ?? undefined,
+        comment: row.comment ?? undefined,
+        disabled: row.disabled,
+      } as CreateFirewallRuleDto,
+    );
+  }
+
+  /** Rebuild a set sentence from a mirror-row snapshot (rollback path). */
+  private setSentenceFromRow(row: FirewallRuleRow, deviceId: string): string[] {
+    return this.setSentence(
+      row,
+      {
+        action: row.action,
+        protocol: row.protocol ?? undefined,
+        srcAddress: row.srcAddress ?? undefined,
+        dstAddress: row.dstAddress ?? undefined,
+        srcPort: row.srcPort ?? undefined,
+        dstPort: row.dstPort ?? undefined,
+        inInterface: row.inInterface ?? undefined,
+        outInterface: row.outInterface ?? undefined,
+        toAddresses: row.toAddresses ?? undefined,
+        toPorts: row.toPorts ?? undefined,
+        comment: row.comment ?? undefined,
+        disabled: row.disabled,
+      } as UpdateFirewallRuleDto,
+      deviceId,
+    );
   }
 
   // ------------------------------------------------------------- builders --
@@ -428,6 +671,7 @@ function toDto(r: FirewallRuleRow): FirewallRule {
     comment: r.comment,
     disabled: r.disabled,
     managed: r.managed,
+    revoked: r.revoked,
     mikrotikId: r.mikrotikId,
   };
 }

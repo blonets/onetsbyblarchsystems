@@ -181,4 +181,9 @@ export class ListFirewallRulesQuery {
   @IsOptional()
   @IsString()
   chain?: string;
+
+  /** Include rollback-revoked rules (hidden by default). */
+  @IsOptional()
+  @IsBoolean()
+  includeRevoked?: boolean;
 }
