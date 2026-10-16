@@ -19,5 +19,18 @@ FROM node:24-slim AS runner
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=builder /prod/api ./
+# Prisma CLI (pinned to the version in apps/api/package.json) + schema/migrations,
+# so the entrypoint can run `prisma migrate deploy` at container start.
+COPY --from=builder /app/apps/api/prisma ./prisma
+RUN npm install --no-save --no-audit --no-fund prisma@6.16.0
+# curl is needed for the HEALTHCHECK below.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl \
+  && rm -rf /var/lib/apt/lists/*
+COPY infra/docker/api-entrypoint.sh /usr/local/bin/api-entrypoint.sh
+RUN chmod +x /usr/local/bin/api-entrypoint.sh
 EXPOSE 3001
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS "http://localhost:${API_PORT:-3001}/health" || exit 1
+ENTRYPOINT ["/usr/local/bin/api-entrypoint.sh"]
 CMD ["node", "dist/main.js"]
