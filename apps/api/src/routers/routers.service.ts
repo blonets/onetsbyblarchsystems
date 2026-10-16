@@ -48,7 +48,6 @@ export class RoutersService {
       boardName: dto.boardName ?? null,
       routerOsVersion: dto.routerOsVersion ?? null,
       status: 'pending',
-      tags: dto.tags ?? [],
     };
     const row = await this.db.routers.create(data);
     await this.audit.append({
@@ -68,50 +67,20 @@ export class RoutersService {
     pageSize?: number;
     siteId?: string;
     status?: RouterStatus;
-    tag?: string;
   } = {}): Promise<Paginated<Router>> {
     const page = opts.page ?? 1;
     const pageSize = Math.min(opts.pageSize ?? 50, 500);
     const where: Record<string, unknown> = {};
     if (opts.siteId) where.siteId = opts.siteId;
     if (opts.status) where.status = opts.status;
-    const total = opts.tag
-      ? (await this.db.routers.findMany({ where })).filter((r) => (r.tags ?? []).includes(opts.tag!)).length
-      : await this.db.routers.count(where);
-    let rows = await this.db.routers.findMany({
+    const total = await this.db.routers.count(where);
+    const rows = await this.db.routers.findMany({
       where,
       orderBy: { createdAt: 'desc' },
-      ...(!opts.tag ? { skip: (page - 1) * pageSize, take: pageSize } : {}),
+      skip: (page - 1) * pageSize,
+      take: pageSize,
     });
-    // Tag filtering is done in the service (not the port contract) so both
-    // the Prisma adapter and the in-memory fake behave identically.
-    if (opts.tag) {
-      rows = rows
-        .filter((r) => (r.tags ?? []).includes(opts.tag!))
-        .slice((page - 1) * pageSize, page * pageSize);
-    }
     return { items: rows.map(toDto), total, page, pageSize };
-  }
-
-  /**
-   * Resolve a router selector ({ routerIds?, tag? }) to concrete router ids.
-   * Used by tag-based bulk operations.
-   */
-  async resolveSelector(selector: { routerIds?: string[]; tag?: string }): Promise<string[]> {
-    const ids = new Set<string>();
-    if (selector.routerIds) {
-      for (const id of selector.routerIds) {
-        const r = await this.db.routers.findUnique({ id });
-        if (r && r.status !== 'decommissioned') ids.add(r.id);
-      }
-    }
-    if (selector.tag) {
-      const rows = await this.db.routers.findMany({});
-      for (const r of rows) {
-        if (r.status !== 'decommissioned' && (r.tags ?? []).includes(selector.tag)) ids.add(r.id);
-      }
-    }
-    return [...ids];
   }
 
   async findOne(id: string): Promise<Router> {
@@ -133,7 +102,7 @@ export class RoutersService {
     for (const k of [
       'siteId', 'apiPort', 'apiSslPort', 'winboxPort', 'sshPort',
       'telnetPort', 'ftpPort', 'wwwPort', 'identityName', 'boardName',
-      'routerOsVersion', 'serialNumber', 'status', 'tags',
+      'routerOsVersion', 'serialNumber', 'status',
     ] as const) {
       if (dto[k] !== undefined) patch[k] = dto[k];
     }
@@ -207,6 +176,55 @@ export class RoutersService {
     return true;
   }
 
+  /** Worker registry path: ids of every router still under management. */
+  async listIdsForWorker(): Promise<string[]> {
+    const rows = await this.db.routers.findMany({});
+    return rows.filter((r) => r.status !== 'decommissioned').map((r) => r.id);
+  }
+
+  /**
+   * Worker path: raw row view including the vault references. Internal use
+   * only — the refs must never reach a panel DTO; the internal controller
+   * resolves them through the vault at call time.
+   */
+  async getWorkerView(id: string): Promise<WorkerRouterView> {
+    const r = await this.require(id);
+    return {
+      id: r.id,
+      uuid: r.uuid,
+      tunnelIp: r.tunnelIp,
+      sstpUsername: r.sstpUsername,
+      sstpPasswordRef: r.sstpPasswordRef,
+      apiUsername: r.apiUsername,
+      apiPasswordRef: r.apiPasswordRef,
+      apiPort: r.apiPort,
+      identityName: r.identityName,
+      status: r.status,
+    };
+  }
+
+  /**
+   * Worker completion report for a decommission. Unlike {@link decommission}
+   * this does NOT enqueue hub cleanup — the worker has already removed the
+   * hub secret when it reports back; it only flips the row and audits.
+   */
+  async markDecommissioned(id: string): Promise<void> {
+    const row = await this.require(id);
+    if (row.status !== 'decommissioned') {
+      await this.db.routers.update(
+        { id },
+        { status: 'decommissioned', decommissionedAt: new Date() },
+      );
+    }
+    await this.audit.append({
+      routerId: id,
+      action: 'router.decommission',
+      entityType: 'router',
+      entityId: id,
+      result: 'done',
+    });
+  }
+
   private async require(id: string): Promise<RouterRow> {
     const row = await this.db.routers.findUnique({ id });
     if (!row) throw new NotFoundException(`router ${id} not found`);
@@ -214,8 +232,21 @@ export class RoutersService {
   }
 }
 
-export function toDto(r: RouterRow): Router {
-  return {
+/** Raw router view for the worker's internal endpoints (includes vault refs). */
+export interface WorkerRouterView {
+  id: string;
+  uuid: string;
+  tunnelIp: string;
+  sstpUsername: string;
+  sstpPasswordRef: string;
+  apiUsername: string;
+  apiPasswordRef: string;
+  apiPort: number;
+  identityName: string | null;
+  status: RouterStatus;
+}
+
+export function toDto(r: RouterRow): Router {  return {
     id: r.id,
     uuid: r.uuid,
     siteId: r.siteId,
@@ -235,7 +266,6 @@ export function toDto(r: RouterRow): Router {
     boardName: r.boardName,
     serialNumber: r.serialNumber,
     identityName: r.identityName,
-    tags: r.tags ?? [],
     flapCount: r.flapCount,
     pollerShard: r.pollerShard,
     createdAt: r.createdAt.toISOString(),

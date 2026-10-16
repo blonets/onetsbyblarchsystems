@@ -3,12 +3,17 @@ import { randomUUID } from 'node:crypto';
 /**
  * Secret storage port.
  *
- * The DB holds only *references* (`sstpPasswordRef`, `apiPasswordRef`);
- * actual secret values live behind this interface (Vault/KMS in production).
+ * Business tables hold only *references* (`sstpPasswordRef`,
+ * `apiPasswordRef`); actual secret values live behind this interface and
+ * are never returned by any read API, never logged, and never retained by
+ * callers. Plaintext is never stored anywhere: the production
+ * implementation ({@link PostgresVault}) persists values only as
+ * AES-256-GCM ciphertext in the `vault_entries` table, with the master key
+ * supplied via the `VAULT_MASTER_KEY` env var (it never touches the DB).
  *
  * Rules:
- * - `store` returns an opaque reference; the secret value is never logged,
- *   never returned by any read API, and never persisted to Postgres.
+ * - `store` returns an opaque reference; the secret value is never logged
+ *   and never persisted in plaintext.
  * - `retrieve` is called only at the moment a secret is needed (onboarding
  *   .rsc render, secret rotation) and the value must not be retained.
  */
@@ -26,10 +31,10 @@ export const VAULT_PORT = Symbol('VAULT_PORT');
 /**
  * In-memory vault — DEV/TEST ONLY.
  *
- * Loudly warns on construction. Production MUST bind a real Vault/KMS
- * implementation to {@link VAULT_PORT} (e.g. HashiCorp Vault KV with
- * transit encryption, or a cloud KMS envelope). Secrets kept here die with
- * the process and are visible to anyone with heap access.
+ * Loudly warns on construction. This is the binding only when
+ * `VAULT_MASTER_KEY` is unset; with the key set, {@link PostgresVault}
+ * (AES-256-GCM ciphertext in Postgres) is bound instead. Secrets kept here
+ * die with the process and are visible to anyone with heap access.
  */
 export class InMemoryVault implements VaultPort {
   private readonly secrets = new Map<string, string>();
@@ -37,7 +42,7 @@ export class InMemoryVault implements VaultPort {
   constructor() {
     // eslint-disable-next-line no-console
     console.warn(
-      '[vault] Using InMemoryVault — DEV/TEST ONLY. Bind a real Vault/KMS implementation for any production deployment.',
+      '[vault] Using InMemoryVault — DEV/TEST ONLY. Set VAULT_MASTER_KEY to bind the persistent PostgresVault for any production deployment.',
     );
   }
 

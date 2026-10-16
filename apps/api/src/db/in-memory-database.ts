@@ -52,7 +52,7 @@ const DEFAULTS: Record<string, (data: Row) => Row> = {
     apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 22,
     telnetPort: 23, ftpPort: 21, wwwPort: 80,
     status: 'pending', lastSeen: null, routerOsVersion: null, boardName: null,
-    serialNumber: null, identityName: null, tags: [], flapCount: 0, pollerShard: 0,
+    serialNumber: null, identityName: null, flapCount: 0, pollerShard: 0,
     createdAt: new Date(), updatedAt: new Date(), decommissionedAt: null, ...d,
   }),
   downtimes: (d) => ({ id: randomUUID(), startedAt: new Date(), endedAt: null, durationS: null, cause: null, ...d }),
@@ -64,21 +64,10 @@ const DEFAULTS: Record<string, (data: Row) => Row> = {
   hotspotUserProfiles: (d) => ({
     id: randomUUID(), rateLimit: null, sharedUsers: null, sessionTimeout: null,
     idleTimeout: null, keepaliveTimeout: null, quotaBytes: null, quotaSeconds: null,
-    macAddress: null, limitUptime: null, validitySeconds: null, price: null,
-    expiryMode: 'none', mikrotikId: null, ...d,
-  }),
-  hotspotBatches: (d) => ({
-    id: randomUUID(), prefix: '', profileId: null, note: null,
-    createdAt: new Date(), ...d,
-  }),
-  hotspotActiveSessions: (d) => ({
-    id: randomUUID(), address: null, macAddress: null, uptime: null, server: null,
-    reportedAt: new Date(), ...d,
+    mikrotikId: null, ...d,
   }),
   hotspotUsers: (d) => ({
-    id: randomUUID(), passwordRef: null, profileId: null, mode: null, batchId: null,
-    validityFromFirstLogin: false, validitySeconds: null, limitUptime: null,
-    firstLoginAt: null, macAddress: null, expiryMode: 'none', disabled: false,
+    id: randomUUID(), passwordRef: null, profileId: null, disabled: false,
     uptimeUsedS: 0n, bytesIn: 0n, bytesOut: 0n, expiresAt: null, comment: null,
     mikrotikId: null, createdAt: new Date(), ...d,
   }),
@@ -89,11 +78,7 @@ const DEFAULTS: Record<string, (data: Row) => Row> = {
   firewallRules: (d) => ({
     id: randomUUID(), protocol: null, srcAddress: null, dstAddress: null, srcPort: null,
     dstPort: null, inInterface: null, outInterface: null, toAddresses: null, toPorts: null,
-    comment: null, disabled: false, managed: true, revoked: false, mikrotikId: null, ...d,
-  }),
-  firewallJournals: (d) => ({
-    id: randomUUID(), chain: null, ruleId: null, createdRuleIds: [],
-    status: 'pending', createdAt: new Date(), rolledBackAt: null, ...d,
+    comment: null, disabled: false, managed: true, mikrotikId: null, ...d,
   }),
   queues: (d) => ({
     id: randomUUID(), target: null, parent: null, maxLimit: null, limitAt: null,
@@ -114,6 +99,7 @@ const DEFAULTS: Record<string, (data: Row) => Row> = {
     createdAt: new Date(), updatedAt: new Date(), ...d,
   }),
   auditLogs: (d) => ({ id: randomUUID(), actorId: null, routerId: null, result: 'pending', error: null, createdAt: new Date(), ...d }),
+  vaultEntries: (d) => ({ createdAt: new Date(), updatedAt: new Date(), ...d }),
 };
 
 class InMemoryTable implements Table<Row, Row, Row, Row> {
@@ -225,12 +211,9 @@ export class InMemoryDatabase implements DbPort {
   hotspotServers = new InMemoryTable('hotspotServers') as unknown as DbPort['hotspotServers'];
   hotspotProfiles = new InMemoryTable('hotspotProfiles') as unknown as DbPort['hotspotProfiles'];
   hotspotUserProfiles = new InMemoryTable('hotspotUserProfiles') as unknown as DbPort['hotspotUserProfiles'];
-  hotspotBatches = new InMemoryTable('hotspotBatches') as unknown as DbPort['hotspotBatches'];
-  hotspotActiveSessions = new InMemoryTable('hotspotActiveSessions') as unknown as DbPort['hotspotActiveSessions'];
   hotspotUsers = new InMemoryTable('hotspotUsers') as unknown as DbPort['hotspotUsers'];
   hotspotWalledGardens = new InMemoryTable('hotspotWalledGardens') as unknown as DbPort['hotspotWalledGardens'];
   firewallRules = new InMemoryTable('firewallRules') as unknown as DbPort['firewallRules'];
-  firewallJournals = new InMemoryTable('firewallJournals') as unknown as DbPort['firewallJournals'];
   queues = new InMemoryTable('queues') as unknown as DbPort['queues'];
   backups = new InMemoryTable('backups') as unknown as DbPort['backups'];
   backupSchedules = new InMemoryTable('backupSchedules') as unknown as DbPort['backupSchedules'];
@@ -238,4 +221,5 @@ export class InMemoryDatabase implements DbPort {
   onboardingTokens = new InMemoryTable('onboardingTokens') as unknown as DbPort['onboardingTokens'];
   notificationRules = new InMemoryTable('notificationRules') as unknown as DbPort['notificationRules'];
   auditLogs = new InMemoryTable('auditLogs') as unknown as DbPort['auditLogs'];
+  vaultEntries = new InMemoryTable('vaultEntries', (r) => String(r.ref)) as unknown as DbPort['vaultEntries'];
 }

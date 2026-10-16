@@ -398,6 +398,44 @@ export class ProvisioningService {
     return { opId };
   }
 
+  // -------------------------------------------------- worker internal ---
+
+  /**
+   * Worker rotate-secrets path (internal endpoint): mint fresh SSTP + API
+   * passwords for a router, vault them, swap the router row's refs, and
+   * return the plaintext exactly once — the worker applies it on the router
+   * (panel-api user) and on the hub `/ppp secret` over its existing
+   * sessions. The superseded vault refs are deliberately left in place:
+   * nothing else in the platform revokes rotated-out refs, and the old
+   * values become unreachable the moment the row points at the new refs.
+   */
+  async generateFreshSecrets(
+    routerId: string,
+  ): Promise<{ sstpPassword: string; apiPassword: string }> {
+    const router = await this.db.routers.findUnique({ id: routerId });
+    if (!router) throw new NotFoundException(`router ${routerId} not found`);
+    const sstpPassword = generateRouterCredentials().password;
+    const apiPassword = randomBytes(32).toString('base64url');
+    const sstpPasswordRef = await this.vault.store(sstpPassword);
+    const apiPasswordRef = await this.vault.store(apiPassword);
+    try {
+      await this.db.routers.update({ id: routerId }, { sstpPasswordRef, apiPasswordRef });
+    } catch (err) {
+      await this.vault.revoke(sstpPasswordRef).catch(() => undefined);
+      await this.vault.revoke(apiPasswordRef).catch(() => undefined);
+      throw err;
+    }
+    await this.audit.append({
+      routerId,
+      action: 'provisioning.secrets.fresh',
+      entityType: 'router',
+      entityId: routerId,
+      opId: newOpId(),
+      result: 'done',
+    });
+    return { sstpPassword, apiPassword };
+  }
+
   // ------------------------------------------------------------------ util ---
 
   private async requireLiveToken(token: string) {

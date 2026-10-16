@@ -13,6 +13,7 @@ import { EventsModule } from './events/events.module.js';
 import { FirewallModule } from './firewall/firewall.module.js';
 import { HealthModule } from './health/health.module.js';
 import { HotspotModule } from './hotspot/hotspot.module.js';
+import { InternalModule } from './internal/internal.module.js';
 import { JobsModule } from './jobs/jobs.module.js';
 import { MonitoringModule } from './monitoring/monitoring.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
@@ -37,6 +38,7 @@ import { VaultModule } from './vault/vault.module.js';
     RoutersModule,
     ProvisioningModule,
     CommandsModule,
+    InternalModule,
     HotspotModule,
     FirewallModule,
     QueuesModule,

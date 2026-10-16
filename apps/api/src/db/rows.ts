@@ -77,7 +77,6 @@ export interface RouterRow {
   boardName: string | null;
   serialNumber: string | null;
   identityName: string | null;
-  tags: string[]; // free-form grouping labels, e.g. ["cairo","vip"]
   flapCount: number;
   pollerShard: number;
   createdAt: Date;
@@ -127,36 +126,7 @@ export interface HotspotUserProfileRow {
   keepaliveTimeout: string | null;
   quotaBytes: bigint | null;
   quotaSeconds: number | null;
-  macAddress: string | null;
-  limitUptime: string | null;
-  validitySeconds: number | null;
-  price: number | null;
-  expiryMode: string; // remove | notify | remove+notify | none
   mikrotikId: string | null;
-}
-
-export interface HotspotBatchRow {
-  id: string;
-  routerId: string;
-  mode: string; // up | vc
-  prefix: string;
-  count: number;
-  codeLength: number;
-  profileId: string | null;
-  note: string | null;
-  opId: string;
-  createdAt: Date;
-}
-
-export interface HotspotActiveSessionRow {
-  id: string;
-  routerId: string;
-  username: string;
-  address: string | null;
-  macAddress: string | null;
-  uptime: string | null;
-  server: string | null;
-  reportedAt: Date;
 }
 
 export interface HotspotUserRow {
@@ -165,14 +135,6 @@ export interface HotspotUserRow {
   name: string;
   passwordRef: string | null;
   profileId: string | null;
-  mode: string | null; // up | vc
-  batchId: string | null;
-  validityFromFirstLogin: boolean;
-  validitySeconds: number | null;
-  limitUptime: string | null;
-  firstLoginAt: Date | null;
-  macAddress: string | null;
-  expiryMode: string; // remove | notify | remove+notify | none
   disabled: boolean;
   uptimeUsedS: bigint;
   bytesIn: bigint;
@@ -215,28 +177,7 @@ export interface FirewallRuleRow {
   comment: string | null;
   disabled: boolean;
   managed: boolean;
-  revoked: boolean; // rollback soft-delete: disabled on-device, mirror row kept
   mikrotikId: string | null;
-}
-
-/** Rollback journal entry for one firewall change. */
-export interface FirewallJournalRow {
-  id: string;
-  routerId: string;
-  opId: string;
-  action: string;
-  table: string;
-  chain: string | null;
-  ruleId: string | null;
-  /** Before-snapshot of affected mirror rows (plain objects). */
-  before: unknown;
-  /** Mirror rows created by the journaled op (rollback revokes these). */
-  createdRuleIds: unknown;
-  /** Exact sentences applied (string[][]). */
-  sentences: unknown;
-  status: string; // pending | applied | rolled-back
-  createdAt: Date;
-  rolledBackAt: Date | null;
 }
 
 export interface QueueRow {
@@ -334,4 +275,14 @@ export interface AuditLogRow {
   result: string;
   error: string | null;
   createdAt: Date;
+}
+
+/** One AES-256-GCM-encrypted secret held by PostgresVault (see src/vault/). */
+export interface VaultEntryRow {
+  ref: string;
+  ciphertext: string;
+  iv: string;
+  authTag: string;
+  createdAt: Date;
+  updatedAt: Date;
 }

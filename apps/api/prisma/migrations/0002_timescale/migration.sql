@@ -49,11 +49,17 @@ ALTER TABLE metric_traffic SET (timescaledb.compress,
 SELECT add_compression_policy('metric_traffic', INTERVAL '7 days', if_not_exists => TRUE);
 
 -- 1-hour rollups for dashboards (continuous aggregate)
+-- WITH NO DATA is REQUIRED: Prisma runs each migration inside a single
+-- transaction, and CREATE MATERIALIZED VIEW ... WITH DATA cannot run inside
+-- a transaction block (this exact error failed this migration in production
+-- on 2026-10-16 → Prisma P3009 on every later deploy). The refresh policy
+-- below populates the aggregate on its schedule.
 CREATE MATERIALIZED VIEW IF NOT EXISTS metric_traffic_1h
 WITH (timescaledb.continuous) AS
 SELECT time_bucket('1 hour', ts) AS bucket, router_id, iface,
        avg(rx_bps)::bigint AS rx_bps, avg(tx_bps)::bigint AS tx_bps
-FROM metric_traffic GROUP BY bucket, router_id, iface;
+FROM metric_traffic GROUP BY bucket, router_id, iface
+WITH NO DATA;
 SELECT add_continuous_aggregate_policy('metric_traffic_1h',
   start_offset => INTERVAL '3 hours', end_offset => INTERVAL '1 hour',
   schedule_interval => INTERVAL '1 hour', if_not_exists => TRUE);
