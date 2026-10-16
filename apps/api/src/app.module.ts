@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
+import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard.js';
 import { RolesGuard } from './auth/guards/roles.guard.js';
@@ -21,6 +22,7 @@ import { ProvisioningModule } from './provisioning/provisioning.module.js';
 import { QueuesModule } from './queues/queues.module.js';
 import { RealtimeModule } from './realtime/realtime.module.js';
 import { RoutersModule } from './routers/routers.module.js';
+import { SitesModule } from './sites/sites.module.js';
 import { VaultModule } from './vault/vault.module.js';
 
 @Module({
@@ -33,8 +35,10 @@ import { VaultModule } from './vault/vault.module.js';
     EventsModule,
     JobsModule,
     VaultModule,
+    AuditModule,
     AuthModule,
     HealthModule,
+    SitesModule,
     RoutersModule,
     ProvisioningModule,
     CommandsModule,

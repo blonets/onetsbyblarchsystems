@@ -1327,7 +1327,7 @@ export class HttpApiClient implements ApiClient {
       },
     });
 
-    if (res.status === 401 && !retried) {
+    if (res.status === 401 && !retried && !path.startsWith('/auth/')) {
       await this.doRefresh();
       return this.request<T>(path, init, true);
     }
@@ -1360,9 +1360,16 @@ export class HttpApiClient implements ApiClient {
         writeSession(null);
         throw new ApiHttpError(401, 'session expired');
       }
-      const refreshed = await this.post<Pick<AuthSession, 'accessToken' | 'refreshToken' | 'expiresAt'>>('/auth/refresh', {
-        refreshToken: session.refreshToken,
+      const res = await fetch(`${this.baseUrl}/api/v1/auth/refresh`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ refreshToken: session.refreshToken }),
       });
+      if (!res.ok) {
+        writeSession(null);
+        throw new ApiHttpError(401, 'session expired');
+      }
+      const refreshed = (await res.json()) as Pick<AuthSession, 'accessToken' | 'refreshToken' | 'expiresAt'>;
       writeSession({ ...session, ...refreshed });
     })();
     try {
@@ -1710,10 +1717,29 @@ export class HttpApiClient implements ApiClient {
         : 'Applied without safe-apply',
     };
   }
-  async listFirewallJournal(_r: string): Promise<FirewallJournalEntry[]> {
-    return [];
+  async listFirewallJournal(r: string): Promise<FirewallJournalEntry[]> {
+    const rows = await this.get<Array<{
+      id: string;
+      routerId: string;
+      opId: string;
+      action: string;
+      createdRuleIds?: string[];
+      rolledBackAt?: string | null;
+      createdAt: string;
+    }>>(`/routers/${r}/firewall/journal`).catch(() => []);
+    return rows.map((j) => ({
+      id: j.id,
+      routerId: j.routerId,
+      createdAt: j.createdAt,
+      op: j.action.includes('safe') ? 'safe-apply' : 'apply',
+      ruleCount: j.createdRuleIds?.length ?? 1,
+      ruleIds: j.createdRuleIds ?? [],
+      rolledBack: Boolean(j.rolledBackAt),
+      actor: 'panel',
+    }));
   }
-  async rollbackFirewallJournal(_r: string, _entryId: string): Promise<ApplyResult> {
+  async rollbackFirewallJournal(r: string, entryId: string): Promise<ApplyResult> {
+    await this.post(`/routers/${r}/firewall/rollback/${entryId}`);
     return { applied: true, rolledBack: true, message: 'Rolled back journal entry' };
   }
 
