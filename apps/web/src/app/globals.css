@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--color-slate-950);
+  color: var(--color-slate-100);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* slim scrollbars for the shell */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-slate-700);
+  border-radius: 8px;
+}
