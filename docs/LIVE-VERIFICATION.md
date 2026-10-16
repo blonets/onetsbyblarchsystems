@@ -1,12 +1,30 @@
 # Live Verification Checklist — MikroTik Fleet Platform
 
-> ⛔ **STATUS: NOT YET RUN.** Every item below is deferred until TCP egress is enabled
-> for the build environment **or** until this checklist is executed post-deploy on the
-> Dokploy VPS (which has full network access to the hub CHR and the test site CHR).
+> 🟡 **STATUS: PARTIALLY RUN — first live pass executed 2026-10-16.** Direct
+> ros-api verification was run against the real hub CHR (`34.91.70.17`) and test
+> CHR (`34.12.242.142`), both RouterOS **6.49.17**, after TCP egress was enabled
+> for the build environment. Items proven by **direct ros-api calls** are marked
+> `RUN — PASS` / `PARTIAL` below; items that require the **panel → worker →
+> router** path remain **NOT YET RUN** — they stay blocked until the Dokploy
+> deployment is accepted live (see "Deployment verification (Dokploy)" at the
+> end of this document).
+>
+> **Proven live 2026-10-16 (direct ros-api):** hub SSTP server up on 443 with a
+> Let's Encrypt cert (Gen-Y chain: YR2 → Root YR); test client connected with
+> `verify-server-certificate=yes` +
+> `verify-server-address-from-certificate=yes`; DNS-based dialing via
+> `vpn.onetsbyblarch.online` (tunnel re-established, hub→client ping 3/3, 0%
+> loss); PPP secret `sstp-test-01` with static tunnel IP `10.200.0.2`; login
+> strategy (new-style `/login` first, MD5-challenge fallback; item targeting
+> via `=.id=`); hotspot user CRUD; firewall filter add/move/remove; queue
+> simple add/set/remove (RouterOS normalizes `20M/20M` → `20000000/20000000` —
+> expected behavior, not a failure); system backup create (24,048 bytes) +
+> config export + cleanup. The queue proofs have no dedicated checklist item
+> below and are recorded here.
 >
 > Test assets (from project context):
 > - Hub CHR (SSTP server): `34.91.70.17` — **custom service ports**: SSH 8922,
->   Telnet 8923, FTP 8921, WWW 8980. API port assumed default 8728 (confirm in item 1).
+>   Telnet 8923, FTP 8921, WWW 8980. API port 8728 (confirmed live 2026-10-16).
 > - Test site CHR (SSTP client target): `34.12.242.142` — default ports.
 >
 > DNS update 2026-10-16: canonical hub address is `vpn.onetsbyblarch.online`
@@ -52,7 +70,12 @@ commands run from the VPS shell unless marked `[router-terminal]`.
 ```
 **Expected:** `chain=input action=accept protocol=tcp dst-port=443`.
 
-**Mark:** NOT YET RUN ☐
+**Mark:** PARTIAL (2026-10-16) — 1a/1b RUN — PASS: SSTP server up on 443
+serving the Let's Encrypt cert (Gen-Y: YR2 → Root YR); API login to the hub
+works; PPP secret `sstp-test-01` exists with static tunnel IP `10.200.0.2`.
+1c (explicit `/ip/firewall/filter/print` for the 443 accept rule) was not
+separately captured — successful external SSTP dial-in to 443 is indirect
+evidence only.
 
 ## 2. Client dial from test CHR
 
@@ -68,7 +91,12 @@ commands run from the VPS shell unless marked `[router-terminal]`.
 (or /16) on the sstp interface. On the hub: `/ppp/active/print` shows the user
 with address `<TUN>`.
 
-**Mark:** NOT YET RUN ☐
+**Mark:** RUN — PASS (2026-10-16) — test client dials
+`vpn.onetsbyblarch.online:443` (DNS-based dialing), tunnel re-established and
+running, static tunnel IP `10.200.0.2` assigned, hub→client ping 3/3 with 0%
+loss. Note: the live client runs with `verify-server-certificate=yes` +
+`verify-server-address-from-certificate=yes` — stronger than the
+`verify-server-certificate=no` shown in the step template above.
 
 ## 3. API reachability over the tunnel IP
 
@@ -81,7 +109,12 @@ with address `<TUN>`.
 **Expected:** `platform`, `version` (6.x/7.x), `board-name`, `uptime` returned;
 round-trip < 300 ms typical.
 
-**Mark:** NOT YET RUN ☐
+**Mark:** PARTIAL (2026-10-16) — ros-api against the test CHR is proven (the
+direct proofs in items 4/6/7/9 all ran over it) and the tunnel itself is proven
+(PPP active; hub→client ping 0% loss). NOT YET RUN: ros-api addressed to the
+tunnel IP `10.200.0.2` from the platform host — the 2026-10-16 direct calls
+targeted the CHR's public address, and the platform stack is not yet accepted
+live (see Deployment verification).
 
 ## 4. ros-api login — BOTH flows
 
@@ -96,7 +129,13 @@ round-trip < 300 ms typical.
 within the login timeout. (Unit tests cover the byte-level encoding; this item
 proves it against real RouterOS.)
 
-**Mark:** NOT YET RUN ☐
+**Mark:** PARTIAL (2026-10-16) — 4a RUN — PASS live on 6.49.17 (new-style
+`/login` with `=name=`/`=password=` sent first; a bare `/login` first fails on
+6.43+, as expected). 4b: the MD5-challenge fallback is implemented in ros-api
+and covered by unit tests against the mock RouterOS server, but has NOT been
+proven against a real pre-6.43 device — none exists in the lab (both CHRs run
+6.49.17). 4c (wrong password → clean typed `RosApiAuthError`) was not
+separately evidenced in the live run.
 
 ## 5. Onboarding one-liner end-to-end
 
@@ -114,7 +153,10 @@ proves it against real RouterOS.)
 `/user/print where name=panel-api` exists; `/system/scheduler/print` shows the
 watchdog (interval 2m, start-time=startup).
 
-**Mark:** NOT YET RUN ☐
+**Mark:** NOT YET RUN ☐ — blocked on the panel being live (see Deployment
+verification). The underlying pieces (hub PPP secret, SSTP client with LE
+certificate verification) were proven manually by script on 2026-10-16, but
+the token → one-liner → panel flow itself has never been executed.
 
 ## 6. Hotspot user CRUD round-trip
 
@@ -128,7 +170,10 @@ watchdog (interval 2m, start-time=startup).
 
 **Expected:** each step reflected on the router ≤ 10 s; audit rows complete.
 
-**Mark:** NOT YET RUN ☐
+**Mark:** PARTIAL (2026-10-16) — create/read/delete of hotspot users
+RUN — PASS via direct ros-api calls against the test CHR. NOT YET RUN: the
+steps as written (panel → worker → router), disable-from-panel, and the
+AuditLog rows (step 5).
 
 ## 7. Firewall rule add/remove (+ safe-apply)
 
@@ -142,7 +187,11 @@ watchdog (interval 2m, start-time=startup).
 
 **Expected:** add/move/delete all reconcile; safe-apply reverts and raises an alert.
 
-**Mark:** NOT YET RUN ☐
+**Mark:** PARTIAL (2026-10-16) — steps 1–3 RUN — PASS via direct ros-api
+calls against the test CHR: filter rule ADD, MOVE (reorder), and REMOVE all
+verified on the router. NOT YET RUN: the same operations driven from the
+panel, and the step-4 safe-apply rollback drill (push a rule that blocks
+management and watch auto-revert).
 
 ## 8. Downtime ledger on forced disconnect
 
@@ -156,7 +205,10 @@ watchdog (interval 2m, start-time=startup).
 **Expected:** ledger matches the forced window; no duplicate rows on flap
 (single disable/enable = exactly one row).
 
-**Mark:** NOT YET RUN ☐
+**Mark:** NOT YET RUN ☐ — depends on the worker poller + monitoring
+persistence, which are not yet live (see Deployment verification). Tunnel
+state changes were observed manually during the 2026-10-16 session, but no
+Downtime ledger rows have ever been produced.
 
 ## 9. Backup / restore smoke test
 
@@ -172,7 +224,12 @@ watchdog (interval 2m, start-time=startup).
 **Expected:** restore completes; router returns to managed `online` state;
 config matches the backup snapshot.
 
-**Mark:** NOT YET RUN ☐
+**Mark:** PARTIAL (2026-10-16) — the router-side half of step 1 RUN — PASS
+via direct ros-api: `/system backup save` created a 24,048-byte backup on
+the test CHR and `/export` produced a config export; the test files were
+cleaned up afterwards. NOT YET RUN: panel-triggered backup with encrypted
+storage + post-decrypt checksum verification (step 2), and the
+factory-reset → re-onboard → restore drill (steps 3–4).
 
 ## 10. Watchdog self-heal
 
@@ -185,7 +242,9 @@ config matches the backup snapshot.
 log shows detect → redial → connected. Panel downtime row for this episode is
 short (< 5 min) or absent if redial beat the 3-missed-heartbeat threshold.
 
-**Mark:** NOT YET RUN ☐
+**Mark:** NOT YET RUN ☐ — the watchdog script ships in the onboarding
+template, but this kill-and-watch drill has never been executed on a live
+router.
 
 ---
 
@@ -193,15 +252,37 @@ short (< 5 min) or absent if redial beat the 3-missed-heartbeat threshold.
 
 | Item | Result | Date | By |
 |---|---|---|---|
-| 1 Hub SSTP | ☐ NOT YET RUN | | |
-| 2 Client dial | ☐ NOT YET RUN | | |
-| 3 API over tunnel | ☐ NOT YET RUN | | |
-| 4 Login both flows | ☐ NOT YET RUN | | |
+| 1 Hub SSTP | 🟡 PARTIAL (1c not separately captured) | 2026-10-16 | |
+| 2 Client dial | ✅ PASS | 2026-10-16 | |
+| 3 API over tunnel | 🟡 PARTIAL (tunnel-IP path not run) | 2026-10-16 | |
+| 4 Login both flows | 🟡 PARTIAL (4b mock-only, 4c open) | 2026-10-16 | |
 | 5 Onboarding 1-liner | ☐ NOT YET RUN | | |
-| 6 Hotspot CRUD | ☐ NOT YET RUN | | |
-| 7 Firewall + safe-apply | ☐ NOT YET RUN | | |
+| 6 Hotspot CRUD | 🟡 PARTIAL (direct ros-api only) | 2026-10-16 | |
+| 7 Firewall + safe-apply | 🟡 PARTIAL (direct ros-api only) | 2026-10-16 | |
 | 8 Downtime ledger | ☐ NOT YET RUN | | |
-| 9 Backup/restore | ☐ NOT YET RUN | | |
+| 9 Backup/restore | 🟡 PARTIAL (create/export only) | 2026-10-16 | |
 | 10 Watchdog self-heal | ☐ NOT YET RUN | | |
+| 11 Deployment (Dokploy) | ⛔ BLOCKED (see below) | 2026-10-16 | |
 
 No item may be marked done without pasted command output as evidence.
+
+---
+
+## Deployment verification (Dokploy) — 2026-10-16
+
+- The Compose stack (TimescaleDB `postgres`, `redis`, `api`, `worker`, `web`)
+  builds and deploys on Dokploy from `infra/dokploy/compose.yml`. Domains
+  `admin.onetsbyblarch.online` → `web:3000` and
+  `api.onetsbyblarch.online` → `api:3001` are configured, with Traefik
+  routing + Let's Encrypt certificate labels in place and both services
+  joined to `dokploy-network`.
+- ⛔ **BLOCKED — the platform is NOT yet accepted live.** The `api`
+  container crash-loops: its entrypoint runs `prisma migrate deploy`, which
+  fails with **P3009** because migration `0002_timescale` failed on its
+  first run and is now recorded as failed in the production database. The
+  `worker` container also crash-loops on startup (internal API
+  contract/config — see ARCHITECTURE.md, "Worker ↔ API internal contract").
+- Until both are fixed and the stack redeploys healthy, every panel-path
+  item above (5, the panel halves of 6/7/9, 8, and item 10's panel-side
+  assertions) remains blocked, and the 7-day soak on ≥3 routers cannot
+  start.

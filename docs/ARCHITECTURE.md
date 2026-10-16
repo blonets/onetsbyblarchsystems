@@ -136,6 +136,46 @@ Modules: `auth` (JWT + RBAC roles: admin, operator, technician, viewer), `sites`
 - **quota-enforcer**: hotspot time/volume quotas; runs on schedule, disables/rate-limits
   over-quota users.
 
+### Worker ↔ API internal contract (`/internal/*`)
+
+The worker holds **no** router credentials and **no** router registry of its own:
+everything it needs about routers comes from the API over internal HTTP endpoints
+(the API is the only component that resolves vault secrets). The `/internal/*`
+routes are machine-to-machine only and are never exposed through the panel's
+public routes.
+
+**Endpoints the API must expose for the worker:**
+
+| Endpoint | Purpose / shape |
+|---|---|
+| `GET /internal/worker/routers` | `{ routerIds: string[] }` — the full managed-router set; the worker applies its shard filter locally. |
+| `GET /internal/worker/routers/:id/endpoint` | Endpoint descriptor `{ host, apiPort, username, password }`: `host` is the router's static tunnel IP, `apiPort` its per-router API port, and `password` is resolved from the vault at call time and returned only over this authenticated internal call — never persisted worker-side. |
+| `GET /internal/worker/routers/:id/provision-info` | `{ sstpUsername, uuid }` for the provisioning flow. |
+| `POST /internal/worker/routers/:id/fresh-secrets` | The worker asks the API to generate fresh per-router secrets (SSTP + API passwords) during provisioning/rotation. The API generates them, stores the references in the vault, applies the hub-side `/ppp secret`, and returns the plaintext exactly once so the worker can apply it on the router. |
+| `POST /internal/worker/routers/:id/decommission` | The worker reports a completed decommission; the API marks the router row decommissioned. |
+| `POST /internal/worker/audit` | The worker appends audit entries for actions it executed directly (provision results, direct device operations) into the API's append-only audit log. |
+| `POST /internal/commands/results` | The worker reports `commands`-queue job outcomes (`opId`, status, result/error). **Already implemented.** |
+
+**Auth.** All internal routes sit behind the API's `InternalGuard`: the caller
+must send the header `x-internal-key` equal to the env var `INTERNAL_API_KEY`,
+and the guard **fails closed** when `INTERNAL_API_KEY` is unset. The worker must
+send this header on every internal call, and must be configured with
+`API_BASE_URL` pointing at the internal api service (e.g. `http://api:3001`
+inside the compose network) — never a localhost default in deployment.
+
+> **Implementation status (discovered 2026-10-16):** only
+> `POST /internal/commands/results` exists on the API side. The
+> `/internal/worker/*` endpoints above existed only implicitly in the worker
+> code and were never implemented in `apps/api`; the worker also currently
+> authenticates with `Authorization: Bearer $WORKER_SERVICE_TOKEN`, which the
+> `InternalGuard` does not accept. Implementing the missing endpoints and
+> aligning the worker to the `x-internal-key` scheme is tracked Phase 1 work.
+
+**Failure semantics.** Registry/API fetch failures in the worker are
+**retryable**: the worker logs the failure and retries on the next poll cycle
+(its normal backoff applies). An unreachable or erroring API must never crash
+the worker process — no unhandled rejection may escape the poll loops.
+
 ### apps/web (Next.js App Router, TS)
 Tailwind + shadcn/ui, next-intl (Arabic RTL default, English), React Query,
 Socket.IO live status. Corporate-premium, technician-friendly (big touch targets,
