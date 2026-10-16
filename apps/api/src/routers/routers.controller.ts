@@ -1,45 +1,63 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post } from '@nestjs/common';
-import type { Router } from '@mtk/types';
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
+import { IsIn, IsOptional, IsString } from 'class-validator';
+import type { RouterStatus } from '@mtk/types';
 import { Roles } from '../auth/decorators/roles.decorator.js';
-import { CreateRouterDto } from './dto/create-router.dto.js';
-import { UpdateRouterDto } from './dto/update-router.dto.js';
+import { PaginationQuery } from '../common/dto/pagination.dto.js';
+import { CurrentUser } from '../common/decorators/current-user.decorator.js';
+import type { CurrentUserType } from '../common/types.js';
+import { CreateRouterDto, UpdateRouterDto } from './dto/router.dto.js';
 import { RoutersService } from './routers.service.js';
 
+class RouterQuery extends PaginationQuery {
+  @IsOptional()
+  @IsString()
+  siteId?: string;
+
+  @IsOptional()
+  @IsIn(['pending', 'online', 'offline', 'suspect', 'decommissioned'])
+  status?: RouterStatus;
+}
+
 @Controller('routers')
+@Roles('technician')
 export class RoutersController {
   constructor(private readonly routers: RoutersService) {}
 
   @Get()
-  findAll(): Router[] {
-    return this.routers.findAll();
+  findAll(@Query() q: RouterQuery) {
+    return this.routers.findAll({ page: q.page, pageSize: q.pageSize, siteId: q.siteId, status: q.status });
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string): Router {
+  findOne(@Param('id') id: string) {
     return this.routers.findOne(id);
   }
 
   @Get(':id/status')
-  getStatus(@Param('id') id: string): { id: string; status: string; lastSeenAt?: string } {
+  getStatus(@Param('id') id: string) {
     return this.routers.getStatus(id);
   }
 
-  @Roles('admin', 'operator')
+  @Roles('operator')
   @Post()
-  create(@Body() dto: CreateRouterDto): Router {
-    return this.routers.create(dto);
+  @HttpCode(201)
+  create(@Body() dto: CreateRouterDto, @CurrentUser() actor: CurrentUserType) {
+    return this.routers.create(dto, actor);
   }
 
-  @Roles('admin', 'operator')
+  @Roles('operator')
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: UpdateRouterDto): Router {
-    return this.routers.update(id, dto);
+  update(@Param('id') id: string, @Body() dto: UpdateRouterDto, @CurrentUser() actor: CurrentUserType) {
+    return this.routers.update(id, dto, actor);
   }
 
+  /**
+   * Decommission (soft): marks the router decommissioned and enqueues
+   * hub-secret removal. The row is kept for history.
+   */
   @Roles('admin')
   @Delete(':id')
-  @HttpCode(204)
-  remove(@Param('id') id: string): void {
-    this.routers.remove(id);
+  decommission(@Param('id') id: string, @CurrentUser() actor: CurrentUserType) {
+    return this.routers.decommission(id, actor);
   }
 }

@@ -1,27 +1,42 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import type { Router, RouterStatus } from '@mtk/types';
-import { CreateRouterDto } from './dto/create-router.dto.js';
-import { UpdateRouterDto } from './dto/update-router.dto.js';
+import { newOpId, type Paginated, type Router, type RouterStatus } from '@mtk/types';
+import { AuditService } from '../audit/audit.service.js';
+import type { CurrentUserType } from '../common/types.js';
+import { DB_PORT, type DbPort, type NewRouter } from '../db/database.port.js';
+import type { RouterRow } from '../db/rows.js';
+import { JOBS_PORT, type JobsPort } from '../jobs/jobs.module.js';
+import { CreateRouterDto, UpdateRouterDto } from './dto/router.dto.js';
 
 /**
- * Routers CRUD + status.
+ * Routers CRUD + lifecycle.
  *
- * Storage is an in-memory Map for the scaffold so the API boots without a
- * database. TODO: replace with PrismaClient (see prisma/schema.prisma) —
- * the method signatures are already the repository interface the Prisma
- * implementation must satisfy.
+ * `status` / `lastSeen` are the platform's last-known view, maintained by the
+ * worker's connection-manager heartbeats (see monitoring module) — this
+ * service never dials a router itself. Decommission is soft: the row stays for
+ * history and the hub secret removal goes through the `provision` queue.
  */
 @Injectable()
 export class RoutersService {
-  private readonly store = new Map<string, Router>();
+  constructor(
+    @Inject(DB_PORT) private readonly db: DbPort,
+    @Inject(JOBS_PORT) private readonly jobs: JobsPort,
+    private readonly audit: AuditService,
+  ) {}
 
-  create(dto: CreateRouterDto): Router {
-    const now = new Date().toISOString();
-    const router: Router = {
-      id: randomUUID(),
-      siteId: dto.siteId,
-      identity: dto.identity,
+  async create(dto: CreateRouterDto, actor?: CurrentUserType): Promise<Router> {
+    if (dto.siteId) {
+      const site = await this.db.sites.findUnique({ id: dto.siteId });
+      if (!site || site.deletedAt) throw new NotFoundException(`site ${dto.siteId} not found`);
+    }
+    const data: NewRouter = {
+      uuid: dto.uuid ?? randomUUID(),
+      siteId: dto.siteId ?? null,
+      tunnelIp: dto.tunnelIp,
+      sstpUsername: dto.sstpUsername,
+      sstpPasswordRef: dto.sstpPasswordRef,
+      apiPasswordRef: dto.apiPasswordRef,
+      apiUsername: dto.apiUsername ?? 'panel-api',
       apiPort: dto.apiPort ?? 8728,
       apiSslPort: dto.apiSslPort ?? 8729,
       winboxPort: dto.winboxPort ?? 8291,
@@ -29,69 +44,170 @@ export class RoutersService {
       telnetPort: dto.telnetPort ?? 23,
       ftpPort: dto.ftpPort ?? 21,
       wwwPort: dto.wwwPort ?? 80,
-      status: 'unknown',
-      isHub: dto.isHub ?? false,
-      createdAt: now,
-      updatedAt: now,
+      identityName: dto.identityName ?? null,
+      boardName: dto.boardName ?? null,
+      routerOsVersion: dto.routerOsVersion ?? null,
+      status: 'pending',
     };
-    this.store.set(router.id, router);
-    return router;
+    const row = await this.db.routers.create(data);
+    await this.audit.append({
+      actorId: actor?.sub,
+      routerId: row.id,
+      action: 'router.create',
+      entityType: 'router',
+      entityId: row.id,
+      after: { uuid: row.uuid, tunnelIp: row.tunnelIp },
+      result: 'done',
+    });
+    return toDto(row);
   }
 
-  findAll(): Router[] {
-    return [...this.store.values()];
+  async findAll(opts: {
+    page?: number;
+    pageSize?: number;
+    siteId?: string;
+    status?: RouterStatus;
+  } = {}): Promise<Paginated<Router>> {
+    const page = opts.page ?? 1;
+    const pageSize = Math.min(opts.pageSize ?? 50, 500);
+    const where: Record<string, unknown> = {};
+    if (opts.siteId) where.siteId = opts.siteId;
+    if (opts.status) where.status = opts.status;
+    const total = await this.db.routers.count(where);
+    const rows = await this.db.routers.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    });
+    return { items: rows.map(toDto), total, page, pageSize };
   }
 
-  findOne(id: string): Router {
-    const router = this.store.get(id);
-    if (!router) throw new NotFoundException(`router ${id} not found`);
-    return router;
+  async findOne(id: string): Promise<Router> {
+    return toDto(await this.require(id));
   }
 
-  update(id: string, dto: UpdateRouterDto): Router {
-    const current = this.findOne(id);
-    const updated: Router = {
-      ...current,
-      ...definedOnly(dto),
-      updatedAt: new Date().toISOString(),
-    };
-    this.store.set(id, updated);
-    return updated;
+  async findByUuid(uuid: string): Promise<Router | null> {
+    const row = await this.db.routers.findUnique({ uuid });
+    return row ? toDto(row) : null;
   }
 
-  remove(id: string): void {
-    if (!this.store.delete(id)) throw new NotFoundException(`router ${id} not found`);
+  async update(id: string, dto: UpdateRouterDto, actor?: CurrentUserType): Promise<Router> {
+    const before = await this.require(id);
+    if (dto.siteId !== undefined && dto.siteId !== null) {
+      const site = await this.db.sites.findUnique({ id: dto.siteId });
+      if (!site || site.deletedAt) throw new NotFoundException(`site ${dto.siteId} not found`);
+    }
+    const patch: Record<string, unknown> = {};
+    for (const k of [
+      'siteId', 'apiPort', 'apiSslPort', 'winboxPort', 'sshPort',
+      'telnetPort', 'ftpPort', 'wwwPort', 'identityName', 'boardName',
+      'routerOsVersion', 'serialNumber', 'status',
+    ] as const) {
+      if (dto[k] !== undefined) patch[k] = dto[k];
+    }
+    const row = await this.db.routers.update({ id }, patch);
+    await this.audit.append({
+      actorId: actor?.sub,
+      routerId: id,
+      action: 'router.update',
+      entityType: 'router',
+      entityId: id,
+      before: { status: before.status },
+      after: { status: row.status },
+      result: 'done',
+    });
+    return toDto(row);
   }
 
   /**
-   * Last-known status from the platform's point of view.
-   * TODO: live-check via the worker's ConnectionManager (ping the API port
-   * over the tunnel) instead of trusting the stored value.
+   * Decommission: mark the row, enqueue hub-secret removal + cleanup.
+   * The row is kept for audit/history.
    */
-  getStatus(id: string): { id: string; status: RouterStatus; lastSeenAt?: string } {
-    const router = this.findOne(id);
-    return { id: router.id, status: router.status, lastSeenAt: router.lastSeenAt };
+  async decommission(id: string, actor?: CurrentUserType): Promise<Router> {
+    const row = await this.require(id);
+    const opId = newOpId();
+    const updated = await this.db.routers.update(
+      { id },
+      { status: 'decommissioned', decommissionedAt: new Date() },
+    );
+    await this.jobs.add('provision', 'decommission', {
+      kind: 'provision',
+      type: 'decommission',
+      opId,
+      routerId: id,
+      sstpUsername: row.sstpUsername,
+    }, { jobId: opId });
+    await this.audit.append({
+      actorId: actor?.sub,
+      routerId: id,
+      action: 'router.decommission',
+      entityType: 'router',
+      entityId: id,
+      opId,
+      result: 'pending',
+    });
+    return toDto(updated);
   }
 
-  /** Called by the worker poller. TODO: persist + write RouterMetric hypertable. */
-  markSeen(id: string, rosVersion?: string): Router {
-    const router = this.findOne(id);
-    const updated: Router = {
-      ...router,
-      status: 'online',
-      lastSeenAt: new Date().toISOString(),
-      rosVersion: rosVersion ?? router.rosVersion,
-      updatedAt: new Date().toISOString(),
-    };
-    this.store.set(id, updated);
-    return updated;
+  /** Last-known status from the platform's point of view (worker heartbeats). */
+  async getStatus(id: string): Promise<{ id: string; status: RouterStatus; lastSeen?: string | null }> {
+    const row = await this.require(id);
+    return { id: row.id, status: row.status, lastSeen: row.lastSeen?.toISOString() ?? null };
+  }
+
+  /** Worker heartbeat path: mark online. Returns true when the status flipped. */
+  async markSeen(id: string, info: { version?: string; board?: string } = {}): Promise<boolean> {
+    const row = await this.require(id);
+    const was = row.status;
+    const patch: Record<string, unknown> = { lastSeen: new Date() };
+    if (was !== 'online') patch.status = 'online';
+    if (info.version) patch.routerOsVersion = info.version;
+    if (info.board) patch.boardName = info.board;
+    await this.db.routers.update({ id }, patch);
+    return was !== 'online';
+  }
+
+  /** Worker path: mark offline (downtime ledger is owned by monitoring). */
+  async markOffline(id: string): Promise<boolean> {
+    const row = await this.require(id);
+    if (row.status === 'offline') return false;
+    await this.db.routers.update({ id }, { status: 'offline' });
+    return true;
+  }
+
+  private async require(id: string): Promise<RouterRow> {
+    const row = await this.db.routers.findUnique({ id });
+    if (!row) throw new NotFoundException(`router ${id} not found`);
+    return row;
   }
 }
 
-function definedOnly<T extends object>(dto: T): Partial<T> {
-  const out: Partial<T> = {};
-  for (const [k, v] of Object.entries(dto)) {
-    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
-  }
-  return out;
+export function toDto(r: RouterRow): Router {
+  return {
+    id: r.id,
+    uuid: r.uuid,
+    siteId: r.siteId,
+    tunnelIp: r.tunnelIp,
+    sstpUsername: r.sstpUsername,
+    apiUsername: r.apiUsername,
+    apiPort: r.apiPort,
+    apiSslPort: r.apiSslPort,
+    winboxPort: r.winboxPort,
+    sshPort: r.sshPort,
+    telnetPort: r.telnetPort,
+    ftpPort: r.ftpPort,
+    wwwPort: r.wwwPort,
+    status: r.status,
+    lastSeen: r.lastSeen?.toISOString() ?? null,
+    routerOsVersion: r.routerOsVersion,
+    boardName: r.boardName,
+    serialNumber: r.serialNumber,
+    identityName: r.identityName,
+    flapCount: r.flapCount,
+    pollerShard: r.pollerShard,
+    createdAt: r.createdAt.toISOString(),
+    updatedAt: r.updatedAt.toISOString(),
+    decommissionedAt: r.decommissionedAt?.toISOString() ?? null,
+  };
 }
