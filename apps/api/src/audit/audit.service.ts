@@ -32,8 +32,24 @@ export class AuditService {
         const patch: Record<string, unknown> = {};
         if (input.result !== undefined) patch.result = input.result;
         if (input.error !== undefined) patch.error = input.error;
-        if (input.after !== undefined && input.after !== null) patch.after = input.after;
-        if (input.before !== undefined && input.before !== null) patch.before = input.before;
+        if (input.after !== undefined && input.after !== null) {
+          const prevAfter = (typeof existing.after === 'object' && existing.after !== null)
+            ? (existing.after as Record<string, unknown>)
+            : {};
+          const nextAfter = (typeof input.after === 'object' && input.after !== null)
+            ? (input.after as Record<string, unknown>)
+            : {};
+          patch.after = { ...prevAfter, ...nextAfter };
+        }
+        if (input.before !== undefined && input.before !== null) {
+          const prevBefore = (typeof existing.before === 'object' && existing.before !== null)
+            ? (existing.before as Record<string, unknown>)
+            : {};
+          const nextBefore = (typeof input.before === 'object' && input.before !== null)
+            ? (input.before as Record<string, unknown>)
+            : {};
+          patch.before = { ...prevBefore, ...nextBefore };
+        }
         if (Object.keys(patch).length > 0) {
           await this.db.auditLogs.update({ opId: input.opId }, patch);
         }

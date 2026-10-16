@@ -174,8 +174,9 @@ export class RouterCommandsService {
     await this.audit.settle(payload.opId, payload.ok ? 'done' : 'failed', payload.error);
 
     const rows = payload.rows ?? [];
-    if (payload.ok && rows.length > 0) {
-      await this.reconcileMirror(audit, rows[0]);
+    const targetRow = rows.find((r) => r['.id'] || r['id'] || r['ret']) ?? rows[0];
+    if (payload.ok && targetRow) {
+      await this.reconcileMirror(audit, targetRow);
     }
 
     if (audit.routerId) {
