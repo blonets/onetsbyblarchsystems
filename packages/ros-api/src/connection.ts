@@ -71,19 +71,30 @@ export class RosConnection {
 
   /**
    * Log in. In `auto` mode a `!trap` on the modern flow falls back to the
-   * legacy MD5 challenge-response flow (pre-6.43 devices). Any other error —
-   * including a trap on the legacy flow — is rethrown as-is.
+   * legacy MD5 challenge-response flow (pre-6.43 devices). A `!trap` on the
+   * legacy flow is surfaced as a combined {@link RosLoginError} so the real
+   * cause (e.g. wrong password) is not masked by the fallback attempt.
+   * `loginMode: 'modern'` / `'legacy'` pin a single flow.
    */
   async login(username: string, password: string): Promise<void> {
     if (this.loginMode === 'legacy') {
       await this.loginLegacy(username, password);
       return;
     }
+    let modernErr: unknown;
     try {
       await this.loginModern(username, password);
+      return;
     } catch (err) {
+      modernErr = err;
       if (this.loginMode === 'modern' || !(err instanceof RosTrapError)) throw err;
+    }
+    try {
       await this.loginLegacy(username, password);
+    } catch (legacyErr) {
+      throw new RosLoginError(
+        `login failed: modern flow: ${shortErr(modernErr)}; legacy flow: ${shortErr(legacyErr)}`,
+      );
     }
   }
 
@@ -105,15 +116,20 @@ export class RosConnection {
 
   /**
    * Send one command sentence and collect reply sentences until the terminal
-   * `!done` / `!trap` / `!fatal`. Throws {@link RosTrapError} / {@link RosFatalError}
-   * on rejection.
+   * `!done` / `!fatal`. A failed command is reported as `!trap` followed by
+   * the final `!done` (verified on RouterOS 6.49.17) — the trap is mapped to
+   * {@link RosTrapError}, `!fatal` to {@link RosFatalError}.
    */
   async talk(words: string[]): Promise<ReplySentence[]> {
     const replies = await this.talkRaw(words);
-    const last = replies[replies.length - 1];
-    if (last?.type === 'trap') {
-      throw new RosTrapError(last.attrs['message'] ?? 'command rejected (!trap)', last.attrs);
+    const trapReply = replies.find((r) => r.type === 'trap');
+    if (trapReply) {
+      throw new RosTrapError(
+        trapReply.attrs['message'] ?? 'command rejected (!trap)',
+        trapReply.attrs,
+      );
     }
+    const last = replies[replies.length - 1];
     if (last?.type === 'fatal') {
       throw new RosFatalError(last.attrs['message'] ?? 'fatal API error', last.attrs);
     }
@@ -128,7 +144,14 @@ export class RosConnection {
       const sentence = await this.transport.readSentence();
       const reply = parseReply(sentence);
       replies.push(reply);
-      if (reply.type !== 're') return replies;
+      // A command's reply is zero or more `!re` sentences terminated by
+      // `!done`. A failed command sends `!trap` BEFORE the final `!done`
+      // (live-verified on RouterOS 6.49.17 across unknown-command,
+      // bad-id and unknown-parameter traps) — so `!trap` is collected, NOT
+      // terminal. Stopping at `!trap` would leave its trailing `!done` in the
+      // stream and desync every later command on the session. `!fatal` means
+      // the session is dead and terminates the reply immediately.
+      if (reply.type === 'done' || reply.type === 'fatal') return replies;
     }
   }
 
@@ -165,11 +188,19 @@ export class RosConnection {
   }
 }
 
+function shortErr(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 function assertOk(replies: ReplySentence[], what: string): void {
-  const last = replies[replies.length - 1];
-  if (last?.type === 'trap') {
-    throw new RosTrapError(last.attrs['message'] ?? `${what} rejected (!trap)`, last.attrs);
+  const trapReply = replies.find((r) => r.type === 'trap');
+  if (trapReply) {
+    throw new RosTrapError(
+      trapReply.attrs['message'] ?? `${what} rejected (!trap)`,
+      trapReply.attrs,
+    );
   }
+  const last = replies[replies.length - 1];
   if (last?.type === 'fatal') {
     throw new RosFatalError(last.attrs['message'] ?? `${what} fatal error`, last.attrs);
   }

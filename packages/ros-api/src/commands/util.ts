@@ -25,5 +25,12 @@ export function queryWords(filter: Record<string, string | undefined> = {}): str
 /** `=.id=<id>` word used by remove/set/enable/disable. */
 export const idWord = (id: string): string => `=.id=${id}`;
 
+/**
+ * Attach a RouterOS API correlation tag (`=.tag=<tag>`) to a sentence.
+ * Tags are echoed back on every reply sentence of the command, so concurrent
+ * commands on one session can be matched to their responses.
+ */
+export const withTag = (words: string[], tag: string): string[] => [...words, `=.tag=${tag}`];
+
 /** Parse a RouterOS yes/no string. */
 export const parseYesNo = (v: string | undefined): boolean => v === 'yes' || v === 'true';
