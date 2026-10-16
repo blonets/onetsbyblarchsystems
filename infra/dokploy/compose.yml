@@ -126,7 +126,10 @@ services:
       PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:-}
       PORT: 3000
     ports:
-      - '3000:3000'
+      # Host port 3002: 3000 is already allocated on the Dokploy host by
+      # another app. Dokploy/Traefik routes the domain to container port 3000
+      # over the compose network, so the host binding is only for debugging.
+      - '3002:3000'
     healthcheck:
       # node:24-slim has no curl/wget; use node's built-in fetch.
       test: ['CMD-SHELL', 'node -e "fetch(`http://localhost:3000/`).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"']
