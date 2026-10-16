@@ -82,6 +82,9 @@ services:
       SMTP_FROM: ${SMTP_FROM:-}
     ports:
       - '${API_PORT:-3001}:${API_PORT:-3001}'
+    networks:
+      - default
+      - dokploy-network
     healthcheck:
       test: ['CMD-SHELL', 'curl -fsS http://localhost:${API_PORT:-3001}/health || exit 1']
       interval: 30s
@@ -130,6 +133,9 @@ services:
       # another app. Dokploy/Traefik routes the domain to container port 3000
       # over the compose network, so the host binding is only for debugging.
       - '3002:3000'
+    networks:
+      - default
+      - dokploy-network
     healthcheck:
       # node:24-slim has no curl/wget; use node's built-in fetch.
       test: ['CMD-SHELL', 'node -e "fetch(`http://localhost:3000/`).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"']
@@ -141,3 +147,9 @@ services:
 volumes:
   pgdata:
   redisdata:
+
+networks:
+  # Traefik (Dokploy's reverse proxy) lives on this external network — any
+  # service with a domain attached MUST join it or the domain returns 404.
+  dokploy-network:
+    external: true
