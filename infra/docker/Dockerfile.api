@@ -18,7 +18,11 @@ RUN pnpm install --frozen-lockfile
 # The API refuses to boot without a generated client (see src/db/prisma.service.ts).
 RUN pnpm --filter @mtk/api exec prisma generate
 RUN pnpm --filter @mtk/api... build
-RUN pnpm --filter @mtk/api --prod deploy /prod/api
+RUN pnpm --filter @mtk/api --prod deploy /prod/api \
+  && PRISMA_SRC=$(echo /app/node_modules/.pnpm/@prisma+client*/node_modules) \
+  && PRISMA_DST=$(echo /prod/api/node_modules/.pnpm/@prisma+client*/node_modules) \
+  && cp -r "$PRISMA_SRC/.prisma" "$PRISMA_DST/" \
+  && cp -r "$PRISMA_SRC/@prisma/client" "$PRISMA_DST/@prisma/"
 
 FROM node:24-slim AS runner
 ENV NODE_ENV=production
