@@ -6,6 +6,8 @@ import { IS_PUBLIC_KEY } from '../decorators/public.decorator.js';
 export interface JwtPayload {
   sub: string;
   email: string;
+  /** Primary role name (rank-based checks use `roles`). */
+  role: string;
   roles: string[];
 }
 

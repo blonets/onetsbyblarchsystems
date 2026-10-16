@@ -1,15 +1,15 @@
 // Prisma schema — MikroTik fleet platform.
 //
-// TimescaleDB: time-series tables (RouterMetric, DowntimeLedger) become
-// hypertables via a SQL migration, NOT via Prisma:
-//   SELECT create_hypertable('RouterMetric', 'time');
-// Run `SELECT create_extension('timescaledb')` once per database (see
-// infra/dokploy/compose.yml — the timescale/timescaledb image ships it).
+// Conventions: `id` = cuid() string PK; all timestamps UTC; soft-delete via
+// `deletedAt` where noted.
 //
-// TODO: add the `prisma` CLI as a devDependency and run `prisma generate`
-// (needs network access to binaries.prisma.sh for the engine download) once
-// DATABASE_URL is set, then replace the in-memory stores in routers.service.ts
-// with PrismaClient.
+// CREDENTIAL RULE (NON-NEGOTIABLE): the DB stores only REFERENCES
+// (`sstpPasswordRef`, `apiPasswordRef` → Vault/KMS key id) — never plaintext
+// secrets. See `src/vault/` for the Vault abstraction.
+//
+// TimescaleDB: the metric_* tables are created as hypertables by migration
+// `0002_timescale` (raw SQL — Prisma doesn't manage hypertables natively).
+// Run `CREATE EXTENSION IF NOT EXISTS timescaledb` once per database.
 
 generator client {
   provider = "prisma-client-js"
@@ -20,241 +20,437 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
 model User {
-  id           String     @id @default(uuid())
-  email        String     @unique
-  passwordHash String
-  name         String?
-  roles        Role[]
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
-  auditEvents  AuditLog[]
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String // bcrypt (cost 12)
+  role         Role      @relation(fields: [roleId], references: [id])
+  roleId       String
+  sites        SiteUser[]
+  auditLogs    AuditLog[]
+  tokensIssued OnboardingToken[]
+  refreshTokens RefreshToken[]
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  disabledAt   DateTime?
+
+  @@index([roleId])
 }
 
+/// Role names are fixed by the architecture contract:
+/// admin | operator | technician | viewer.
+/// Permissions are enforced code-level by the RBAC guard (rank-based):
+/// viewer(1) < technician(2) < operator(3) < admin(4).
+/// Technician: onboard + view. Operator: + hotspot/firewall/queues.
+/// Admin: + users, secret rotation, restore.
 model Role {
-  id    String @id @default(uuid())
-  name  String @unique // admin | operator | viewer
-  users User[]
+  id          String  @id @default(cuid())
+  name        String  @unique
+  description String?
+  users       User[]
 }
+
+model SiteUser {
+  userId String
+  siteId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  site   Site   @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@id([userId, siteId])
+}
+
+/// Hashed refresh tokens. Rotation: on refresh the presented token is revoked
+/// and replaced; reuse of a revoked token revokes the whole chain (theft detection).
+model RefreshToken {
+  id        String    @id @default(cuid())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  tokenHash String    @unique // sha256 of the opaque token
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Fleet
+// ---------------------------------------------------------------------------
 
 model Site {
-  id           String   @id @default(uuid())
-  name         String
-  address      String?
-  city         String?
-  country      String?
-  latitude     Float?
-  longitude    Float?
-  contactName  String?
-  contactPhone String?
-  notes        String?
-  routers      Router[]
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id        String     @id @default(cuid())
+  name      String
+  slug      String     @unique
+  address   String?
+  city      String?
+  country   String     @default("EG")
+  lat       Float?
+  lng       Float?
+  notes     String?
+  routers   Router[]
+  users     SiteUser[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  deletedAt DateTime?
+
+  @@index([slug])
 }
 
 model Router {
-  id              String   @id @default(uuid()) // stamped as panel-uuid:<id> in /system identity comment
-  siteId          String
-  site            Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
-  identity        String
-  identityComment String?
-  model           String?
-  boardName       String?
-  rosVersion      String?
-  architecture    String?
-  tunnelIp        String?  @unique // static 10.200.0.0/16 address (ppp secret remote-address)
-  sstpUsername    String?  @unique // per-router UNIQUE SSTP username
-  sstpPasswordRef String?  // vault reference — NEVER a plaintext password
-  // Service ports are first-class: the hub CHR runs SSH 8922 / Telnet 8923 /
-  // FTP 8921 / WWW 8980; site routers may differ too. ros-api always connects
-  // to these values — never to hard-coded ports. Defaults are RouterOS factory defaults.
-  apiPort         Int      @default(8728)
-  apiSslPort      Int      @default(8729)
-  winboxPort      Int      @default(8291)
-  sshPort         Int      @default(22)
-  telnetPort      Int      @default(23)
-  ftpPort         Int      @default(21)
-  wwwPort         Int      @default(80)
-  status          String   @default("unknown") // RouterStatus: online|offline|provisioning|error|unknown
-  lastSeenAt      DateTime?
-  isHub           Boolean  @default(false)
-  // Cascade: a downstream MikroTik behind this router registers as a Router too.
-  parentRouterId  String?
-  parentRouter    Router?  @relation("RouterCascade", fields: [parentRouterId], references: [id])
-  children        Router[] @relation("RouterCascade")
-  hotspotServers  HotspotServer[]
-  hotspotProfiles HotspotProfile[]
-  hotspotUsers    HotspotUser[]
-  firewallRules   FirewallRule[]
-  queues          Queue[]
-  backups         Backup[]
-  downstreamDevices DownstreamDevice[]
-  metrics         RouterMetric[]
-  downtime        DowntimeLedger[]
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id   String @id @default(cuid())
+  uuid String @unique // stamped into the router; identity anchor (panel-uuid:<uuid>)
 
-  @@index([siteId])
+  site   Site?   @relation(fields: [siteId], references: [id])
+  siteId String?
+
+  // --- tunnel identity ---
+  tunnelIp        String  @unique // 10.200.x.y, static via /ppp secret remote-address
+  sstpUsername    String  @unique // per-router unique SSTP username
+  sstpPasswordRef String // Vault/KMS reference ONLY — never plaintext
+  apiUsername     String  @default("panel-api")
+  apiPasswordRef  String // Vault/KMS reference ONLY — never plaintext
+
+  // --- service ports (per-router configurable; field routers use custom ports,
+  //     e.g. hub CHR: ssh 8922 / telnet 8923 / ftp 8921 / www 8980) ---
+  apiPort    Int @default(8728)
+  apiSslPort Int @default(8729)
+  winboxPort Int @default(8291)
+  sshPort    Int @default(22)
+  telnetPort Int @default(23)
+  ftpPort    Int @default(21)
+  wwwPort    Int @default(80)
+
+  // --- state ---
+  status          RouterStatus @default(pending) // pending|online|offline|suspect|decommissioned
+  lastSeen        DateTime?
+  routerOsVersion String? // e.g. "7.15.2"
+  boardName       String? // e.g. "hAP ac^2"
+  serialNumber    String?
+  identityName    String? // /system identity name (site slug)
+  flapCount       Int     @default(0) // tunnel flaps in last hour (worker-maintained)
+  pollerShard     Int     @default(0) // hash(uuid) % shards; assigned by worker
+
+  downtimes      Downtime[]
+  hotspotServers HotspotServer[]
+  hotspotProfiles HotspotProfile[] // server-profiles
+  hotspotUserProfiles HotspotUserProfile[] // user-profiles (plans)
+  hotspotUsers   HotspotUser[]
+  hotspotWalledGardens HotspotWalledGarden[]
+  firewallRules  FirewallRule[]
+  queues         Queue[]
+  backups        Backup[]
+  backupSchedules BackupSchedule[]
+  downstream     DownstreamDevice[]
+  auditLogs      AuditLog[]
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  decommissionedAt DateTime?
+
   @@index([status])
+  @@index([siteId])
+  @@index([pollerShard])
+  @@index([lastSeen])
 }
 
-model HotspotServer {
-  id        String  @id @default(uuid())
-  routerId  String
-  router    Router  @relation(fields: [routerId], references: [id], onDelete: Cascade)
-  name      String
-  interface String
-  addressPool String?
-  profile   String?
-  disabled  Boolean @default(false)
+enum RouterStatus {
+  pending
+  online
+  offline
+  suspect
+  decommissioned
+}
 
+/// Downtime ledger: one row per offline episode. Opened on missed heartbeats,
+/// closed on reconnect (endedAt + durationS).
+model Downtime {
+  id        String    @id @default(cuid())
+  router    Router    @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId  String
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  durationS Int? // set on close
+  cause     String? // heartbeat-missed | tunnel-flap | maintenance
+
+  @@index([routerId, startedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Hotspot v1
+// ---------------------------------------------------------------------------
+
+model HotspotServer {
+  id         String  @id @default(cuid())
+  router     Router  @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId   String
+  name       String // RouterOS-side name
+  interface  String
+  addressPool String?
+  profile    String // server-profile name
+  disabled   Boolean @default(false)
+  mikrotikId String? // *ID from /ip/hotspot/print (for reconciliation)
+
+  @@unique([routerId, name])
   @@index([routerId])
 }
 
+/// Server-profile (/ip/hotspot/profile).
 model HotspotProfile {
-  id               String  @id @default(uuid())
-  routerId         String
+  id             String  @id @default(cuid())
+  router         Router  @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId       String
+  name           String
+  hotspotAddress String?
+  dnsName        String?
+  loginBy        String? // http-pap,http-chap,cookie,...
+  rateLimit      String?
+  mikrotikId     String?
+
+  @@unique([routerId, name])
+  @@index([routerId])
+}
+
+/// User-profile = plan (/ip/hotspot/user/profile).
+model HotspotUserProfile {
+  id               String  @id @default(cuid())
   router           Router  @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId         String
   name             String
-  rateLimit        String?
+  rateLimit        String? // e.g. "5M/10M"
+  sharedUsers      Int?
   sessionTimeout   String?
   idleTimeout      String?
-  sharedUsers      Int?
-  transparentProxy Boolean @default(false)
-  comment          String?
+  keepaliveTimeout String?
+  quotaBytes       BigInt? // enforced by quota-enforcer (null = unlimited)
+  quotaSeconds     Int?
+  mikrotikId       String?
+  users            HotspotUser[]
 
+  @@unique([routerId, name])
   @@index([routerId])
 }
 
 model HotspotUser {
-  id         String  @id @default(uuid())
-  routerId   String
-  router     Router  @relation(fields: [routerId], references: [id], onDelete: Cascade)
-  server     String
-  name       String
-  profile    String  @default("default")
-  disabled   Boolean @default(false)
-  limitUptime String?
-  comment    String?
+  id          String             @id @default(cuid())
+  router      Router             @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId    String
+  name        String
+  passwordRef String? // Vault/KMS reference; null for MAC-cookie users
+  profile     HotspotUserProfile? @relation(fields: [profileId], references: [id])
+  profileId   String?
+  disabled    Boolean            @default(false)
+  uptimeUsedS BigInt             @default(0) // reconciled from /ip/hotspot/user
+  bytesIn     BigInt             @default(0)
+  bytesOut    BigInt             @default(0)
+  expiresAt   DateTime?
+  comment     String?
+  mikrotikId  String?
+  createdAt   DateTime           @default(now())
 
-  @@index([routerId])
-  @@index([routerId, name])
+  @@unique([routerId, name])
+  @@index([routerId, disabled])
 }
+
+// ---------------------------------------------------------------------------
+// Firewall
+// ---------------------------------------------------------------------------
 
 model FirewallRule {
-  id          String  @id @default(uuid())
-  routerId    String
-  router      Router  @relation(fields: [routerId], references: [id], onDelete: Cascade)
-  chain       String
-  action      String
-  protocol    String?
-  srcAddress  String?
-  dstAddress  String?
-  srcPort     String?
-  dstPort     String?
-  inInterface String?
+  id        String  @id @default(cuid())
+  router    Router  @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId  String
+  table     String // filter | nat | mangle
+  chain     String // input | forward | dstnat | srcnat | prerouting ...
+  action    String // accept | drop | dst-nat | masquerade ...
+  order     Int    // platform-side ordering; reconciled via place-before
+  // match fields (nullable; only set ones are sent)
+  protocol     String?
+  srcAddress   String?
+  dstAddress   String?
+  srcPort      String?
+  dstPort      String?
+  inInterface  String?
   outInterface String?
-  toAddresses String?
-  toPorts     String?
-  comment     String?
-  disabled    Boolean @default(false)
-  source      String  @default("device") // platform | device (panel-proxy:* => platform)
+  toAddresses  String?
+  toPorts      String?
+  comment      String? // panel-managed rules use comment prefixes, e.g. panel-proxy:
+  disabled     Boolean @default(false)
+  managed      Boolean @default(true) // false = discovered, read-only in UI
+  mikrotikId   String?
 
-  @@index([routerId])
+  @@index([routerId, table, chain, order])
 }
+
+// ---------------------------------------------------------------------------
+// Queues
+// ---------------------------------------------------------------------------
 
 model Queue {
-  id        String  @id @default(uuid())
-  routerId  String
-  router    Router  @relation(fields: [routerId], references: [id], onDelete: Cascade)
-  name      String
-  target    String
-  maxLimit  String?
-  limitAt   String?
-  disabled  Boolean @default(false)
-  comment   String?
+  id         String  @id @default(cuid())
+  router     Router  @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId   String
+  kind       String // simple | tree
+  name       String
+  target     String? // simple: target address/interface
+  parent     String? // tree: parent queue
+  maxLimit   String? // "5M/10M"
+  limitAt    String?
+  priority   Int?
+  disabled   Boolean @default(false)
+  mikrotikId String?
 
-  @@index([routerId])
+  @@unique([routerId, kind, name])
 }
+
+// ---------------------------------------------------------------------------
+// Backups
+// ---------------------------------------------------------------------------
 
 model Backup {
-  id          String   @id @default(uuid())
-  routerId    String
-  router      Router   @relation(fields: [routerId], references: [id], onDelete: Cascade)
-  fileName    String
-  kind        String   // binary | export
-  sizeBytes   Int?
-  storagePath String?
-  createdAt   DateTime @default(now())
-
-  @@index([routerId])
-}
-
-/// A downstream device behind a site router, exposed via a platform-managed
-/// dst-nat rule (comment `panel-proxy:<deviceId>`).
-model DownstreamDevice {
-  id             String   @id // <deviceId> used in the panel-proxy:<deviceId> nat comment
-  routerId       String
+  id             String   @id @default(cuid())
   router         Router   @relation(fields: [routerId], references: [id], onDelete: Cascade)
-  kind           String   // mikrotik | camera | printer | other
-  label          String?
-  ipAddress      String
-  servicePort    Int
-  proxyPort      Int?     // WAN-side port on the site router, assigned by the platform
-  natRuleId      String?  // RouterOS .id of the managing dst-nat rule
-  managedRouterId String? // Router.id when kind == mikrotik and cascaded
+  routerId       String
+  type           String // export | binary
+  fileName       String
+  storageKey     String // object-storage key (encrypted blob)
+  sizeBytes      BigInt
+  sha256         String
+  kmsKeyId       String
+  retentionUntil DateTime
   createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
 
-  @@index([routerId])
+  @@index([routerId, createdAt])
 }
 
-model ProvisioningToken {
-  token     String   @id
+/// Per-router backup schedule (consumed by the worker `backup` queue).
+model BackupSchedule {
+  id        String  @id @default(cuid())
+  router    Router  @relation(fields: [routerId], references: [id], onDelete: Cascade)
   routerId  String
-  expiresAt DateTime
-  usedAt    DateTime?
+  type      String  @default("export") // export | binary | both
+  cron      String  @default("0 2 * * *") // local-time cron, staggered by worker
+  enabled   Boolean @default(true)
+  retentionDays Int  @default(30)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
+  @@unique([routerId, type])
   @@index([routerId])
 }
 
-model AuditLog {
-  id         String   @id @default(uuid())
-  actorId    String?
-  actor      User?    @relation(fields: [actorId], references: [id])
-  actorType  String   @default("system") // user | system
-  action     String   // e.g. router.provision, firewall.rule.create
-  entityType String
-  entityId   String?
-  metadata   Json?
-  ip         String?
+// ---------------------------------------------------------------------------
+// Downstream devices
+// ---------------------------------------------------------------------------
+
+model DownstreamDevice {
+  id              String    @id @default(cuid())
+  router          Router    @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId        String
+  deviceId        String // used in comment panel-proxy:<deviceId>
+  name            String
+  kind            String // mikrotik | ap | camera | pos | switch | other
+  macAddress      String?
+  lanIp           String
+  mgmtPort        Int // 22 | 80 | 443 | 8728 | 8291
+  protocol        String    @default("tcp")
+  proxyPort       Int? // allocated tunnel-side port on the site router
+  managedRouterId String? // if kind=mikrotik and registered → Router.id (cascade)
+  lastSeen        DateTime?
+
+  // --- vendor-neutral device identity (Phase 1: discovery + proxy only;
+  //     Phase 2 lands per-vendor drivers behind the DeviceDriver contract) ---
+  vendor          String    @default("unknown") // openwrt | ddwrt | ubiquiti | cisco | mikrotik | unknown
+  model           String?   // e.g. "Archer C7", "hAP ac^2"
+  mgmtMethods     Json?     // { web?: number, ssh?: number } — management ports on the device
+
+  @@unique([routerId, deviceId])
+  @@index([routerId])
+}
+
+// ---------------------------------------------------------------------------
+// Provisioning
+// ---------------------------------------------------------------------------
+
+model OnboardingToken {
+  id              String    @id @default(cuid())
+  token           String    @unique // single-use; the router presents it
+  issuedBy        User      @relation(fields: [issuedById], references: [id])
+  issuedById      String
+  siteId          String? // pre-assigned site
+  sstpUsername    String    @unique
+  sstpPasswordRef String // Vault/KMS reference — redeemed once via the .rsc endpoint
+  apiPasswordRef  String // Vault/KMS reference for the on-router `panel-api` user
+  tunnelIp        String    @unique
+  expiresAt       DateTime // now + 15 min
+  usedAt          DateTime?
+  routerId        String? // set on successful callback
+
+  @@index([expiresAt])
+}
+
+/// Walled-garden entries (allow/deny lists for hotspot). kind='dns' →
+/// /ip/hotspot/walled-garden (dst-host); kind='ip' → .../walled-garden/ip.
+model HotspotWalledGarden {
+  id         String   @id @default(cuid())
+  router     Router   @relation(fields: [routerId], references: [id], onDelete: Cascade)
+  routerId   String
+  kind       String   @default("dns")
+  dstHost    String?
+  dstAddress String?
+  action     String   @default("allow") // allow | deny
+  comment    String?
+  disabled   Boolean  @default(false)
+  mikrotikId String?
   createdAt  DateTime @default(now())
 
-  @@index([entityType, entityId])
-  @@index([createdAt])
+  @@index([routerId, kind])
 }
 
-/// Time-series: polled metrics per router. Made a TimescaleDB hypertable by migration.
-model RouterMetric {
-  time     DateTime
-  routerId String
-  router   Router   @relation(fields: [routerId], references: [id], onDelete: Cascade)
-  cpuLoad  Float?
-  freeMemoryBytes  BigInt?
-  uptimeSeconds    BigInt?
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
 
-  @@id([time, routerId])
+/// Alert routing rules: on bus event → enqueue `notify` job → channel sender.
+/// Channel delivery (Telegram/email) requires config (TELEGRAM_BOT_TOKEN /
+/// SMTP_*); without it the notify job fails with a clear NEEDS-CONFIG error —
+/// sends are never faked.
+model NotificationRule {
+  id        String  @id @default(cuid())
+  name      String
+  event     String // router.offline | alert.raised | backup.completed | ...
+  channel   String // telegram | email
+  target    String // chat id / email address
+  template  String? // optional message template override
+  enabled   Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([event, enabled])
 }
 
-/// Time-series: downtime windows. Made a TimescaleDB hypertable by migration.
-model DowntimeLedger {
-  time          DateTime
-  routerId      String
-  router        Router   @relation(fields: [routerId], references: [id], onDelete: Cascade)
-  reconnectedAt DateTime?
-  durationMs    BigInt?
-  reason        String?
+// ---------------------------------------------------------------------------
+// Audit (append-only)
+// ---------------------------------------------------------------------------
 
-  @@id([time, routerId])
+model AuditLog {
+  id        String   @id @default(cuid())
+  actor     User?    @relation(fields: [actorId], references: [id])
+  actorId   String?
+  router    Router?  @relation(fields: [routerId], references: [id], onDelete: SetNull)
+  routerId  String?
+  action    String // hotspot.user.create | firewall.rule.move | backup.restore ...
+  opId      String   @unique // idempotency key from the command path
+  before    Json?
+  after     Json?
+  result    String // pending | done | failed
+  error     String?
+  createdAt DateTime @default(now())
+
+  @@index([routerId, createdAt])
+  @@index([actorId, createdAt])
 }
