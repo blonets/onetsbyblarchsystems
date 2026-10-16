@@ -13,10 +13,14 @@ import { Table, TBody, THead, Th, Tr, Td, Mono } from '@/components/ui/table';
 import { RouterSelect, useRouterPicker } from '@/components/router-picker';
 import {
   useApplyFirewallChanges,
+  useFirewallJournal,
   useFirewallRules,
   usePreviewFirewallChanges,
+  useRollbackFirewallJournal,
 } from '@/lib/queries';
 import { useAuth } from '@/lib/auth';
+import { formatDateTime } from '@/lib/format';
+import { useLocale } from 'next-intl';
 import type { FirewallChange, FirewallRuleInput } from '@/lib/api-client';
 import type { DiffLine, FirewallRule, FirewallTable } from '@/lib/types';
 
@@ -50,6 +54,7 @@ function applyStaged(routerId: string, table: FirewallTable, base: FirewallRule[
         table: table as FirewallRule['table'],
         order: view.length,
         disabled: disabled ?? false,
+        revoked: false,
         managed: true,
         ...rest,
       };
@@ -170,12 +175,90 @@ function DiffView({ diff }: { diff: DiffLine[] }) {
   );
 }
 
+// ---------------------------------------------------------------- rollback journal
+function JournalSection({ routerId, canEdit }: { routerId: string; canEdit: boolean }) {
+  const t = useTranslations('firewall.journal');
+  const tCommon = useTranslations('common');
+  const locale = useLocale();
+  const q = useFirewallJournal(routerId);
+  const rollbackM = useRollbackFirewallJournal(routerId);
+  const [rollingBack, setRollingBack] = useState<string | null>(null);
+
+  const entries = q.data ?? [];
+
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <p className="mb-4 text-xs text-slate-500">{t('subtitle')}</p>
+        <QueryState
+          isLoading={q.isLoading} isError={q.isError} error={q.error} refetch={() => q.refetch()}
+          isEmpty={entries.length === 0}
+          empty={<EmptyState title={t('empty')} />}
+        >
+          <Table>
+            <THead>
+              <Th>{t('time')}</Th><Th>{t('op')}</Th><Th>{t('rules')}</Th><Th>{tCommon('status')}</Th>
+              {canEdit && <Th>{tCommon('actions')}</Th>}
+            </THead>
+            <TBody>
+              {entries.map((e) => (
+                <Tr key={e.id} className={e.rolledBack ? 'opacity-60' : undefined}>
+                  <Td className="whitespace-nowrap text-slate-400">{formatDateTime(e.createdAt, locale)}</Td>
+                  <Td>
+                    <span className="rounded-full bg-slate-800 px-2.5 py-0.5 font-mono text-[11px] text-slate-300" dir="ltr">
+                      {e.op}
+                    </span>
+                    {e.table && <span className="ms-2 font-mono text-[11px] text-slate-500">{e.table}</span>}
+                  </Td>
+                  <Td className="tabular-nums">{e.ruleCount}</Td>
+                  <Td>
+                    {e.rolledBack ? (
+                      <span className="rounded-full bg-red-500/15 px-2.5 py-0.5 text-xs text-red-300">{t('rolledBack')}</span>
+                    ) : (
+                      <span className="rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-xs text-emerald-300">{t('applied')}</span>
+                    )}
+                  </Td>
+                  {canEdit && (
+                    <Td>
+                      {!e.rolledBack ? (
+                        <Button
+                          size="sm" variant="outline" disabled={rollbackM.isPending}
+                          onClick={() => setRollingBack(e.id)}
+                        >
+                          {t('rollback')}
+                        </Button>
+                      ) : (
+                        <span className="text-xs text-slate-600">—</span>
+                      )}
+                    </Td>
+                  )}
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        </QueryState>
+        <ConfirmDialog
+          open={rollingBack !== null} onClose={() => setRollingBack(null)}
+          onConfirm={async () => { if (rollingBack) await rollbackM.mutateAsync(rollingBack); setRollingBack(null); }}
+          title={t('rollbackTitle')} message={t('rollbackMessage')} confirmLabel={t('rollback')}
+        />
+        {rollbackM.isSuccess && (
+          <p className="mt-3 rounded-xl bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">{t('rollbackDone')}</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function FirewallPage() {
   const t = useTranslations('firewall');
+  const tJournal = useTranslations('firewall.journal');
   const tCommon = useTranslations('common');
+  const locale = useLocale();
   const { routers, selected, setSelected, isLoading } = useRouterPicker();
   const { canEditNetwork } = useAuth();
   const [table, setTable] = useState<FirewallTable>('filter');
+  const [section, setSection] = useState<'rules' | 'journal'>('rules');
 
   const rulesQ = useFirewallRules(selected, table, !!selected);
   const previewM = usePreviewFirewallChanges(selected);
@@ -243,7 +326,20 @@ export default function FirewallPage() {
         <Card><CardContent className="py-12 text-center text-sm text-slate-400">{tCommon('loading')}</CardContent></Card>
       ) : (
         <>
-          <Tabs tabs={tabItems} active={table} onChange={(tb) => { setTable(tb); setStaged([]); setPreview(null); setResult(null); }} />
+          <Tabs
+            tabs={[
+              { key: 'rules' as const, label: t('tabs.rules') },
+              { key: 'journal' as const, label: tJournal('title') },
+            ]}
+            active={section}
+            onChange={setSection}
+          />
+
+          {section === 'journal' ? (
+            <JournalSection routerId={selected} canEdit={canEditNetwork} />
+          ) : (
+            <>
+              <Tabs tabs={tabItems} active={table} onChange={(tb) => { setTable(tb); setStaged([]); setPreview(null); setResult(null); }} />
 
           <QueryState
             isLoading={rulesQ.isLoading} isError={rulesQ.isError} error={rulesQ.error} refetch={() => rulesQ.refetch()}
@@ -288,15 +384,22 @@ export default function FirewallPage() {
                         </Td>
                         <Td className="max-w-48 truncate text-slate-400" title={r.comment ?? undefined}>{r.comment ?? '—'}</Td>
                         <Td>
-                          {canEditNetwork ? (
-                            <Switch
-                              checked={!r.disabled}
-                              onChange={(v) => stage({ kind: 'toggle', table, ruleId: r.id, disabled: !v })}
-                              label={`${r.chain} ${r.action}`}
-                            />
-                          ) : (
-                            <span className="text-xs text-slate-400">{r.disabled ? tCommon('disabled') : tCommon('enabled')}</span>
-                          )}
+                          <div className="flex flex-col items-start gap-1.5">
+                            {canEditNetwork ? (
+                              <Switch
+                                checked={!r.disabled}
+                                onChange={(v) => stage({ kind: 'toggle', table, ruleId: r.id, disabled: !v })}
+                                label={`${r.chain} ${r.action}`}
+                              />
+                            ) : (
+                              <span className="text-xs text-slate-400">{r.disabled ? tCommon('disabled') : tCommon('enabled')}</span>
+                            )}
+                            {r.revoked && (
+                              <span className="rounded-full bg-red-500/15 px-2 py-0.5 text-[11px] font-medium text-red-300">
+                                {t('revoked')}
+                              </span>
+                            )}
+                          </div>
                         </Td>
                         {canEditNetwork && (
                           <Td>
@@ -340,6 +443,8 @@ export default function FirewallPage() {
 
           {result && (
             <p className="rounded-xl bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">{result}</p>
+          )}
+            </>
           )}
         </>
       )}
