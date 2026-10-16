@@ -6,7 +6,9 @@
  * commands, provision, backup, metrics-ingest, quota, notify.
  *
  * The poller is worker-internal (no canonical job type): each replica owns a
- * `poll` queue with a repeatable `poll-tick` job for its shard.
+ * `poll` queue with a repeatable `poll-tick` job for its shard. The hotspot
+ * expiry sweep is worker-internal too (`expiry` queue, repeatable
+ * `expiry-sweep-tick`).
  *
  * Events published to the `notify` queue use the canonical {@link BusEventName}
  * + {@link BusEventPayload} contract; the API matches them against
@@ -24,7 +26,8 @@ export const QUEUES = {
   metricsIngest: 'metrics-ingest',
   quota: 'quota',
   notify: 'notify',
-} as const satisfies Record<string, QueueName | 'poll'>;
+  expiry: 'expiry',
+} as const satisfies Record<string, QueueName | 'poll' | 'expiry'>;
 
 /** One bus event with its canonical payload. */
 export type WorkerBusEvent = {

@@ -35,7 +35,7 @@ import {
 import { ConnectionManager } from '../../src/connection-manager.js';
 import { pollRouter } from '../../src/jobs/poller.job.js';
 import { RateTracker } from '../../src/metrics.js';
-import { createQuotaProcessor } from '../../src/jobs/quota.job.js';
+import { createExpirySweepProcessor } from '../../src/jobs/expiry-sweep.job.js';
 import { createCommandsProcessor } from '../../src/jobs/commands.job.js';
 import { safeApplyFirewallChange } from '../../src/jobs/safe-apply.js';
 import { createProvisionProcessor } from '../../src/jobs/provision.job.js';
@@ -236,6 +236,44 @@ describeLive('live: test CHR', () => {
       // confirm cleanup
       const left = replyRows(await conn.talk(hotspotUserList({ name: username })));
       expect(left).toHaveLength(0);
+      await manager.dropAll();
+    }
+  });
+
+  it('expiry sweep: dry-run read path on the test CHR (no mutations)', async () => {
+    const manager = new ConnectionManager(testFactory(), {
+      backoff: { maxAttempts: 2, baseMs: 500, jitter: false },
+      sleep: async () => {},
+    });
+    const conn = await manager.ensure('test-chr');
+    try {
+      const servers = replyRows(await conn.talk(['/ip/hotspot/print']));
+      if (servers.length === 0) {
+        console.log('  (skipped: no hotspot server on test CHR)');
+        return;
+      }
+      const audit = new InMemoryAuditSink();
+      const events = new InMemoryEventBus();
+      const process = createExpirySweepProcessor({
+        manager,
+        // empty directory: no platform expiry records → nothing enforced
+        users: { listUsers: async () => [] },
+        audit,
+        events,
+        dryRun: true, // dry-run anyway: this test must never mutate the CHR
+      });
+      const result = await process({
+        data: {
+          kind: 'hotspot-expiry-sweep',
+          opId: `live-exp-${rand(4)}`,
+          routerId: 'test-chr',
+        },
+      } as never);
+      // exercises the live read path (/ip/hotspot/*) with zero mutations
+      expect(result.skipped).toBe(false);
+      expect(result.swept).toHaveLength(0);
+      expect(events.ofType('alert.raised')).toHaveLength(0);
+    } finally {
       await manager.dropAll();
     }
   });

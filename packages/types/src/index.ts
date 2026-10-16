@@ -101,6 +101,8 @@ export interface Router {
   boardName?: string | null;
   serialNumber?: string | null;
   identityName?: string | null;
+  /** Free-form grouping labels, e.g. ["cairo", "vip"]. Used for tag-filtered bulk ops. */
+  tags: string[];
   flapCount: number;
   pollerShard: number;
   createdAt: string;
@@ -156,6 +158,25 @@ export interface HotspotUserProfile {
   keepaliveTimeout?: string | null;
   quotaBytes?: string | null; // serialized bigint; null = unlimited
   quotaSeconds?: number | null;
+  /**
+   * Optional MAC the plan is pinned to. RouterOS has no native user↔MAC pin
+   * on /ip/hotspot/user — the platform stores it here and, for users created
+   * under the plan, emits an /ip/hotspot/ip-binding entry so the lock is
+   * visible/auditable; the worker's session audit flags MAC mismatches.
+   */
+  macAddress?: string | null;
+  /** Total session-time cap pushed to the device as `limit-uptime`, e.g. "12:00:00". */
+  limitUptime?: string | null;
+  /**
+   * Validity window (seconds) that starts on FIRST login — distinct from
+   * `limitUptime` (total session cap). Effective expiry =
+   * firstLoginAt + validitySeconds; enforced by the quota-enforcer.
+   */
+  validitySeconds?: number | null;
+  /** Voucher face value in `currency` units (revenue tile); null = unset (counts as 0). */
+  price?: number | null;
+  /** What happens when the user expires. The enforcer implements the semantics. */
+  expiryMode: HotspotExpiryMode;
   mikrotikId?: string | null;
 }
 
@@ -169,9 +190,62 @@ export interface HotspotUser {
   uptimeUsedS: string; // serialized bigint
   bytesIn: string; // serialized bigint
   bytesOut: string; // serialized bigint
+  /**
+   * Absolute expiry (legacy / explicit). Independent from
+   * `validityFromFirstLogin` — a user is expired when EITHER clock passes.
+   */
   expiresAt?: string | null;
+  /** Generation mode: 'up' = username+random password, 'vc' = voucher code (username == password). */
+  mode?: HotspotUserMode | null;
+  /** Batch this user was generated in (see HotspotUserBatch). */
+  batchId?: string | null;
+  /**
+   * When true, `validitySeconds` counts from `firstLoginAt` instead of from
+   * creation. Explicitly distinct from `limitUptime` (total session cap).
+   */
+  validityFromFirstLogin: boolean;
+  /** Validity window in seconds, starting at firstLoginAt when validityFromFirstLogin. */
+  validitySeconds?: number | null;
+  /** Total session-time cap pushed to the device as `limit-uptime`, e.g. "12:00:00". */
+  limitUptime?: string | null;
+  /** First successful authentication seen by the worker (drives validityFromFirstLogin). */
+  firstLoginAt?: string | null;
+  /** MAC this user is pinned to (see HotspotUserProfile.macAddress). */
+  macAddress?: string | null;
+  /** What happens when the user expires. The enforcer implements the semantics. */
+  expiryMode: HotspotExpiryMode;
   comment?: string | null;
   mikrotikId?: string | null;
+  createdAt: string;
+}
+
+/** Hotspot credential generation mode. */
+export type HotspotUserMode = 'up' | 'vc';
+
+/**
+ * What the platform does when a hotspot user passes expiry.
+ *
+ * Sweep semantics (worker expiry sweep, the single consumer):
+ * - `remove`         → user is removed immediately on expiry.
+ * - `notify`         → user is kept; an expiry notification is raised.
+ * - `remove+notify`  → removed AND notified.
+ * - `none`           → no action.
+ * - unknown/absent   → treated as `disable` (user disabled, not removed).
+ */
+export type HotspotExpiryMode = 'remove' | 'notify' | 'remove+notify' | 'none';
+
+/** One voucher/credential batch generation run. */
+export interface HotspotUserBatch {
+  id: string;
+  routerId: string;
+  mode: HotspotUserMode;
+  prefix: string;
+  count: number;
+  codeLength: number;
+  profileId?: string | null;
+  note?: string | null;
+  /** Idempotency key for the whole batch (one BullMQ job). */
+  opId: string;
   createdAt: string;
 }
 
@@ -215,7 +289,36 @@ export interface FirewallRule {
   comment?: string | null;
   disabled: boolean;
   managed: boolean; // false = discovered on-device, read-only in UI
+  /**
+   * Soft-delete marker set by firewall rollback. A revoked rule is disabled
+   * on-device but its mirror row is kept (with the journal) — rollback never
+   * hard-deletes a journaled rule.
+   */
+  revoked: boolean;
   mikrotikId?: string | null;
+}
+
+/** One journaled firewall change — the rollback record for a firewall op. */
+export interface FirewallJournalEntry {
+  id: string;
+  routerId: string;
+  /** Idempotency key of the journaled command. */
+  opId: string;
+  /** e.g. 'firewall.rule.create'. */
+  action: string;
+  table: string;
+  chain?: string | null;
+  /** Platform rule id the op targeted (null for creates). */
+  ruleId?: string | null;
+  /** Before-snapshot of the affected mirror rows (empty for pure creates). */
+  before: FirewallRule[];
+  /** Mirror rows created by the journaled op (rollback revokes these). */
+  createdRuleIds: string[];
+  /** The exact sentences that were applied. */
+  sentences: string[][];
+  status: 'pending' | 'applied' | 'rolled-back';
+  createdAt: string;
+  rolledBackAt?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -584,6 +687,95 @@ export interface Paginated<T> {
   total: number;
   page: number;
   pageSize: number;
+}
+
+// ---------------------------------------------------------------------------
+// P1 refinements — fleet bulk ops, hotspot batches, firewall journal,
+// monitoring sessions/revenue, provisioning wizard
+// ---------------------------------------------------------------------------
+
+/** Per-router outcome of a bulk operation. One failure never stops the rest. */
+export interface FleetResultItem<T> {
+  routerId: string;
+  ok: boolean;
+  data?: T;
+  error?: string;
+}
+
+/**
+ * Bulk-operation envelope: every addressed router gets exactly one entry,
+ * successes and failures side by side. Callers MUST iterate `results` —
+ * there is no fail-fast.
+ */
+export interface FleetResult<T> {
+  results: FleetResultItem<T>[];
+}
+
+/**
+ * Run per-router attempts sequentially, collecting one outcome per router.
+ * A failure is recorded on its item — it never stops the remaining routers.
+ */
+export async function fleetResult<T>(
+  attempts: Array<{ routerId: string; run: () => T | Promise<T> }>,
+): Promise<FleetResult<T>> {
+  const results: FleetResultItem<T>[] = [];
+  for (const a of attempts) {
+    try {
+      results.push({ routerId: a.routerId, ok: true, data: await a.run() });
+    } catch (err) {
+      results.push({ routerId: a.routerId, ok: false, error: (err as Error).message });
+    }
+  }
+  return { results };
+}
+
+/** A worker-reported active hotspot session (one row per online user). */
+export interface ActiveHotspotSession {
+  routerId: string;
+  username: string;
+  address?: string | null;
+  macAddress?: string | null;
+  uptime?: string | null;
+  server?: string | null;
+  /** When the worker last reported this session. */
+  reportedAt: string;
+}
+
+/** A user past expiry that still has an active session (worker alert input). */
+export interface StaleHotspotSession {
+  userId: string;
+  routerId: string;
+  username: string;
+  expiredAt: string;
+  /** Which expiry clock fired: absolute (expiresAt) or first-login validity. */
+  expiryKind: 'absolute' | 'validity';
+  sessionIp?: string | null;
+  sessionMac?: string | null;
+  /** True when the user is MAC-pinned and the session MAC differs. */
+  macMismatch: boolean;
+}
+
+/** Revenue tile payload — voucher first-logins today × profile face value. */
+export interface RevenueToday {
+  vouchersRedeemed: number;
+  amount: number;
+  currency: string;
+}
+
+/** One wizard step: human title + the exact sentences it will apply. */
+export interface HotspotSetupWizardStep {
+  key: string;
+  title: string;
+  sentences: string[][];
+  notes: string[];
+}
+
+/** Preview returned before `confirm=true` enqueues the wizard. */
+export interface HotspotSetupWizardPreview {
+  opId: string;
+  routerId: string;
+  steps: HotspotSetupWizardStep[];
+  totalSentences: number;
 }
 
 /** Generate an idempotency key for the command path. Pure helper. */

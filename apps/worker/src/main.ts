@@ -5,11 +5,14 @@
  * Queue names and job/event shapes are the canonical contracts from
  * `@mtk/types` (the API enqueues to these exact names):
  * commands, provision, backup, metrics-ingest, quota, notify.
- * The poller is worker-internal (`poll` queue, repeatable `poll-tick`).
+ * The poller is worker-internal (`poll` queue, repeatable `poll-tick`); the
+ * hotspot expiry sweep is worker-internal too (`expiry` queue, repeatable
+ * `expiry-sweep-tick` every 15 min).
  *
  * Schedulers owned by this replica:
  * - `poll-tick` every 60 s → polls this replica's shard → `metrics-ingest`
  * - `quota-tick` every 5 min → one `quota` job per owned router
+ * - `expiry-sweep-tick` every 15 min → one `hotspot-expiry-sweep` job per owned router
  * - `backup-janitor` daily 03:30 → retention cleanup
  * - per-router `backup-<id>` daily 02:00–05:00 staggered (ARCH §3.4)
  *
@@ -47,6 +50,11 @@ import {
 import { createRestoreProcessor } from './jobs/restore.job.js';
 import { createCommandsProcessor, HttpResultReporter } from './jobs/commands.job.js';
 import { createQuotaProcessor } from './jobs/quota.job.js';
+import {
+  createExpirySweepProcessor,
+  HttpHotspotUserDirectory,
+  type HotspotExpirySweepJob,
+} from './jobs/expiry-sweep.job.js';
 import { createProvisionProcessor } from './jobs/provision.job.js';
 import { selectShardRouterIds } from './sharding.js';
 
@@ -81,6 +89,9 @@ async function main(): Promise<void> {
   const apiBase = process.env.API_BASE_URL ?? 'http://localhost:3000';
   const serviceToken = process.env.WORKER_SERVICE_TOKEN ?? '';
   const usePostgres = !!process.env.DATABASE_URL;
+  // The hub CHR id — the expiry sweep (like everything except provisioning)
+  // must never run against it.
+  const hubRouterId = process.env.HUB_ROUTER_ID ?? 'hub';
 
   const registry: RouterRegistry = new HttpRouterRegistry(apiBase, serviceToken);
   const manager = new ConnectionManager(makeConnectionFactory(registry));
@@ -172,11 +183,28 @@ async function main(): Promise<void> {
       });
     }
   };
+  // v7 never disables expired hotspot users — the sweep enforces expiry
+  // (disable + kick; remove when the user's expiryMode calls for it).
+  const enqueueExpirySweepTick = async (): Promise<void> => {
+    for (const routerId of await myRouters()) {
+      const job: HotspotExpirySweepJob = {
+        kind: 'hotspot-expiry-sweep',
+        opId: newOpId(),
+        routerId,
+      };
+      await expiryQueue.add('hotspot-expiry-sweep', job, {
+        jobId: `expiry-sweep-tick-${routerId}`,
+        removeOnComplete: 100,
+        removeOnFail: 200,
+      });
+    }
+  };
   workers.push(
     new Worker(
       QUEUES.poll,
       async (job) => {
         if (job.name === 'quota-tick') return enqueueQuotaTick();
+        if (job.name === 'expiry-sweep-tick') return enqueueExpirySweepTick();
         return pollProcessor(job as never);
       },
       { connection, concurrency: 1 },
@@ -212,6 +240,31 @@ async function main(): Promise<void> {
     'quota-tick',
     { every: Number(process.env.QUOTA_INTERVAL_MS ?? 300_000) },
     { name: 'quota-tick', data: {} },
+  );
+  // expiry-sweep-tick is driven by the same dispatcher (enqueueExpirySweepTick).
+  await pollQueue.upsertJobScheduler(
+    'expiry-sweep-tick',
+    { every: Number(process.env.EXPIRY_SWEEP_INTERVAL_MS ?? 900_000) },
+    { name: 'expiry-sweep-tick', data: {} },
+  );
+
+  // --- hotspot expiry sweep (v7 never disables expired users; one job per ----
+  // --- owned router every 15 min, worker-internal `expiry` queue) -------------
+  const expiryQueue = new Queue(QUEUES.expiry, { connection });
+  queues.push(expiryQueue);
+  workers.push(
+    new Worker(
+      QUEUES.expiry,
+      createExpirySweepProcessor({
+        manager,
+        users: new HttpHotspotUserDirectory(apiBase, serviceToken),
+        audit,
+        events,
+        // Never sweep the hub CHR (or any other guarded id).
+        skipRouterIds: [hubRouterId],
+      }),
+      { connection, concurrency: 4 },
+    ),
   );
 
   // --- backups ----------------------------------------------------------------------
@@ -277,7 +330,6 @@ async function main(): Promise<void> {
   );
 
   // --- provision ----------------------------------------------------------------------
-  const hubRouterId = process.env.HUB_ROUTER_ID ?? 'hub';
   workers.push(
     new Worker(
       QUEUES.provision,
