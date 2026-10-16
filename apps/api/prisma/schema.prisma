@@ -470,11 +470,12 @@ model OnboardingToken {
   sstpUsername    String    @unique
   sstpPasswordRef String // Vault/KMS reference — redeemed once via the .rsc endpoint
   apiPasswordRef  String // Vault/KMS reference for the on-router `panel-api` user
-  tunnelIp        String    @unique
+  tunnelIp        String
   expiresAt       DateTime // now + 15 min
   usedAt          DateTime?
   routerId        String? // set on successful callback
 
+  @@index([tunnelIp])
   @@index([expiresAt])
 }
 

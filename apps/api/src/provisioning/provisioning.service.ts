@@ -473,7 +473,11 @@ export class ProvisioningService {
 
   private async allocateFreeTunnelIp(): Promise<string> {
     const used = new Set<string>();
-    for (const r of await this.db.routers.findMany({})) used.add(r.tunnelIp);
+    used.add('10.200.0.1');
+    used.add('10.200.255.254');
+    for (const r of await this.db.routers.findMany({})) {
+      if (r.tunnelIp) used.add(r.tunnelIp);
+    }
     const now = Date.now();
     for (const t of await this.db.onboardingTokens.findMany({})) {
       if (!t.usedAt && t.expiresAt.getTime() > now) used.add(t.tunnelIp);
