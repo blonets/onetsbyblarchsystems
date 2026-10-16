@@ -1,20 +1,39 @@
 import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import type {
-  DowntimeEntry,
-  MetricPoint,
-  MetricsIngestBatch,
-  MetricType,
-  RouterStatus,
-  RouterStatusPush,
+import { ConfigService } from '@nestjs/config';
+import {
+  fleetResult,
+  type ActiveHotspotSession,
+  type DowntimeEntry,
+  type FleetResult,
+  type MetricPoint,
+  type MetricsIngestBatch,
+  type MetricType,
+  type RevenueToday,
+  type RouterStatus,
+  type RouterStatusPush,
 } from '@mtk/types';
 import { DB_PORT, type DbPort } from '../db/database.port.js';
 import { METRICS_STORE, type MetricsStore } from '../db/metrics-store.js';
 import { EventsService } from '../events/events.module.js';
 import { REALTIME_PORT, type RealtimePort } from '../realtime/realtime.port.js';
+import { RoutersService } from '../routers/routers.service.js';
 
 export interface HeartbeatInput {
   status: 'pending' | 'online' | 'offline' | 'suspect';
   cause?: string;
+}
+
+export interface SessionReport {
+  username: string;
+  address?: string | null;
+  macAddress?: string | null;
+  uptime?: string | null;
+  server?: string | null;
+}
+
+export interface BulkSelector {
+  routerIds?: string[];
+  tag?: string;
 }
 
 /**
@@ -34,6 +53,8 @@ export class MonitoringService {
     @Inject(METRICS_STORE) private readonly metrics: MetricsStore,
     @Inject(REALTIME_PORT) private readonly realtime: RealtimePort,
     private readonly events: EventsService,
+    private readonly config: ConfigService,
+    private readonly routers: RoutersService,
   ) {}
 
   // ------------------------------------------------------------- ingest --
@@ -113,6 +134,101 @@ export class MonitoringService {
   }
 
   // --------------------------------------------------------------- reads --
+
+  /**
+   * Worker/internal endpoint: replace the router's reported active hotspot
+   * sessions wholesale. The poller reports the full `/ip/hotspot/active`
+   * list each cycle; this table is a read model for session search, not
+   * history — stale rows are deleted, not kept.
+   */
+  async ingestSessions(routerId: string, sessions: SessionReport[]): Promise<{ stored: number }> {
+    const router = await this.db.routers.findUnique({ id: routerId });
+    if (!router) throw new NotFoundException(`router ${routerId} not found`);
+    await this.db.hotspotActiveSessions.deleteMany({ routerId });
+    const now = new Date();
+    for (const s of sessions) {
+      await this.db.hotspotActiveSessions.create({
+        routerId,
+        username: s.username,
+        address: s.address ?? null,
+        macAddress: s.macAddress ?? null,
+        uptime: s.uptime ?? null,
+        server: s.server ?? null,
+      });
+    }
+    await this.db.routers.update({ id: routerId }, { lastSeen: now }).catch(() => undefined);
+    return { stored: sessions.length };
+  }
+
+  /**
+   * Session lookup: which router(s) a user is online on, by username and/or
+   * IP. Aggregates the worker-reported active sessions.
+   */
+  async searchSessions(q: { username?: string; ip?: string }): Promise<ActiveHotspotSession[]> {
+    if (!q.username && !q.ip) return [];
+    const rows = await this.db.hotspotActiveSessions.findMany({});
+    const uname = q.username?.toLowerCase();
+    const hits = rows.filter((r) => {
+      if (uname && r.username.toLowerCase() !== uname) return false;
+      if (q.ip && r.address !== q.ip) return false;
+      return true;
+    });
+    return hits.map((r) => ({
+      routerId: r.routerId,
+      username: r.username,
+      address: r.address,
+      macAddress: r.macAddress,
+      uptime: r.uptime,
+      server: r.server,
+      reportedAt: r.reportedAt.toISOString(),
+    }));
+  }
+
+  /**
+   * Revenue tile: voucher-mode (`vc`) users whose FIRST login happened today
+   * (UTC day) × their profile's face value. Profiles without a price count
+   * as 0 — the tile is honest, never faked.
+   */
+  async revenueToday(now: Date = new Date()): Promise<RevenueToday> {
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const users = await this.db.hotspotUsers.findMany({ where: { mode: 'vc' } });
+    const redeemed = users.filter((u) => u.firstLoginAt && u.firstLoginAt >= start);
+    const profiles = new Map(
+      (await this.db.hotspotUserProfiles.findMany({})).map((p) => [p.id, p]),
+    );
+    let amount = 0;
+    for (const u of redeemed) {
+      const price = u.profileId ? profiles.get(u.profileId)?.price ?? null : null;
+      amount += price ?? 0;
+    }
+    return {
+      vouchersRedeemed: redeemed.length,
+      amount: Math.round(amount * 100) / 100,
+      currency: this.config.get<string>('REVENUE_CURRENCY') ?? 'EGP',
+    };
+  }
+
+  /**
+   * Bulk status read over a router selector ({ routerIds?, tag? }).
+   * Returns a FleetResult — one entry per router; a failure is recorded on
+   * its item and never stops the remaining routers.
+   */
+  async bulkStatus(selector: BulkSelector): Promise<FleetResult<{ status: RouterStatus; lastSeen: string | null }>> {
+    const ids = await this.routers.resolveSelector(selector);
+    return fleetResult(
+      ids.map((routerId) => ({
+        routerId,
+        run: async () => {
+          const row = await this.db.routers.findUnique({ id: routerId });
+          if (!row) throw new NotFoundException(`router ${routerId} not found`);
+          return {
+            status: row.status as RouterStatus,
+            lastSeen: row.lastSeen ? row.lastSeen.toISOString() : null,
+          };
+        },
+      })),
+    );
+  }
 
   async getMetrics(
     routerId: string,

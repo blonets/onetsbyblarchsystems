@@ -1,4 +1,4 @@
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
 /** Shared "idempotency key" field for mutating DTOs. */
 export class OpIdDto {
@@ -6,6 +6,8 @@ export class OpIdDto {
   @IsString()
   opId?: string;
 }
+
+export const EXPIRY_MODES = ['remove', 'notify', 'remove+notify', 'none'] as const;
 
 // ---------------------------------------------------------------------------
 // Hotspot servers (/ip/hotspot)
@@ -132,6 +134,41 @@ export class CreateUserProfileDto extends OpIdDto {
   @IsInt()
   @Min(0)
   quotaSeconds?: number;
+
+  /**
+   * MAC pinned to the plan, e.g. "AA:BB:CC:DD:EE:FF". RouterOS has no native
+   * user↔MAC pin — the platform stores it and emits /ip/hotspot/ip-binding
+   * entries for users, so the lock is visible/auditable and the worker can
+   * flag session MAC mismatches.
+   */
+  @IsOptional()
+  @IsString()
+  macAddress?: string;
+
+  /** Total session-time cap, e.g. "12:00:00" → device `limit-uptime`. */
+  @IsOptional()
+  @IsString()
+  limitUptime?: string;
+
+  /**
+   * Validity window (seconds) starting at FIRST login — explicitly distinct
+   * from limitUptime (total session cap).
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  validitySeconds?: number;
+
+  /** Voucher face value for the revenue tile; unset → 0 (never faked). */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  price?: number;
+
+  /** remove | notify | remove+notify | none */
+  @IsOptional()
+  @IsIn([...EXPIRY_MODES])
+  expiryMode?: (typeof EXPIRY_MODES)[number];
 }
 
 export class UpdateUserProfileDto extends OpIdDto {
@@ -164,6 +201,36 @@ export class UpdateUserProfileDto extends OpIdDto {
   @IsInt()
   @Min(0)
   quotaSeconds?: number;
+
+  /** MAC pinned to the plan, e.g. "AA:BB:CC:DD:EE:FF". */
+  @IsOptional()
+  @IsString()
+  macAddress?: string;
+
+  /** Total session-time cap, e.g. "12:00:00" → device `limit-uptime`. */
+  @IsOptional()
+  @IsString()
+  limitUptime?: string;
+
+  /**
+   * Validity window (seconds) starting at FIRST login — explicitly distinct
+   * from limitUptime (total session cap).
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  validitySeconds?: number;
+
+  /** Voucher face value for the revenue tile; unset → 0 (never faked). */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  price?: number;
+
+  /** remove | notify | remove+notify | none */
+  @IsOptional()
+  @IsIn([...EXPIRY_MODES])
+  expiryMode?: (typeof EXPIRY_MODES)[number];
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +287,31 @@ export class CreateHotspotUserDto extends OpIdDto {
   @IsOptional()
   @IsString()
   limitBytesTotal?: string;
+
+  /**
+   * When true, `validitySeconds` counts from the user's first login instead
+   * of `expiresAt` being absolute. Explicitly distinct from `limitUptime`
+   * (total session cap pushed to the device).
+   */
+  @IsOptional()
+  @IsBoolean()
+  validityFromFirstLogin?: boolean;
+
+  /** Validity window (seconds) starting at first login. */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  validitySeconds?: number;
+
+  /** MAC pinned to the user, e.g. "AA:BB:CC:DD:EE:FF". */
+  @IsOptional()
+  @IsString()
+  macAddress?: string;
+
+  /** remove | notify | remove+notify | none */
+  @IsOptional()
+  @IsIn([...EXPIRY_MODES])
+  expiryMode?: (typeof EXPIRY_MODES)[number];
 }
 
 export class UpdateHotspotUserDto extends OpIdDto {
@@ -255,6 +347,25 @@ export class UpdateHotspotUserDto extends OpIdDto {
   @IsOptional()
   @IsString()
   limitBytesTotal?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  validityFromFirstLogin?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  validitySeconds?: number;
+
+  /** MAC pinned to the user, e.g. "AA:BB:CC:DD:EE:FF". */
+  @IsOptional()
+  @IsString()
+  macAddress?: string;
+
+  /** remove | notify | remove+notify | none */
+  @IsOptional()
+  @IsIn([...EXPIRY_MODES])
+  expiryMode?: (typeof EXPIRY_MODES)[number];
 }
 
 // ---------------------------------------------------------------------------
@@ -308,4 +419,95 @@ export class UpdateWalledGardenDto extends OpIdDto {
   @IsOptional()
   @IsBoolean()
   disabled?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Batch generation (vouchers / username+password)
+// ---------------------------------------------------------------------------
+
+/**
+ * Batch-generate hotspot credentials.
+ *
+ * - `up`: username + random password (two secrets per user).
+ * - `vc`: voucher — a single code, username == password.
+ *
+ * The whole batch is applied as ONE BullMQ job (idempotent by `opId`) and
+ * every user comment is encoded `vc-<batchId>-<YYYYMMDD>-<note>` (or `up-…`).
+ */
+export class CreateHotspotBatchDto extends OpIdDto {
+  /** 'up' = username+random password, 'vc' = voucher (username == password). */
+  @IsIn(['up', 'vc'])
+  mode!: 'up' | 'vc';
+
+  /** 1–1000 credentials per batch. */
+  @IsInt()
+  @Min(1)
+  count!: number;
+
+  /** Username/code prefix, e.g. "CAFE-". */
+  @IsOptional()
+  @IsString()
+  prefix?: string;
+
+  /** Random part length (default 8). */
+  @IsOptional()
+  @IsInt()
+  @Min(4)
+  codeLength?: number;
+
+  /**
+   * Strip confusing glyphs (l,L,q,Q,o,O,1,0) from the alphabet — default true
+   * so printed vouchers can't be misread.
+   */
+  @IsOptional()
+  @IsBoolean()
+  excludeConfusing?: boolean;
+
+  /** Platform user-profile id the batch is created under. */
+  @IsOptional()
+  @IsString()
+  profileId?: string;
+
+  /** Raw RouterOS profile name (alternative to profileId). */
+  @IsOptional()
+  @IsString()
+  profileName?: string;
+
+  /** Hotspot server the users belong to; default "all". */
+  @IsOptional()
+  @IsString()
+  server?: string;
+
+  /** Free note — embedded in the encoded comment after the date stamp. */
+  @IsOptional()
+  @IsString()
+  note?: string;
+
+  /** ISO-8601 absolute expiry applied to every user in the batch. */
+  @IsOptional()
+  @IsString()
+  expiresAt?: string;
+
+  /**
+   * When true, validitySeconds counts from each user's first login instead
+   * of expiresAt being absolute. Distinct from limitUptime (session cap).
+   */
+  @IsOptional()
+  @IsBoolean()
+  validityFromFirstLogin?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  validitySeconds?: number;
+
+  /** Total session cap pushed to the device as `limit-uptime`. */
+  @IsOptional()
+  @IsString()
+  limitUptime?: string;
+
+  /** remove | notify | remove+notify | none */
+  @IsOptional()
+  @IsIn([...EXPIRY_MODES])
+  expiryMode?: (typeof EXPIRY_MODES)[number];
 }

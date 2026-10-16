@@ -30,11 +30,13 @@ import {
   walledGardenSet,
 } from '@mtk/ros-api';
 import {
+  type HotspotExpiryMode,
   type HotspotProfile,
   type HotspotServer,
   type HotspotUser,
   type HotspotUserProfile,
   type Paginated,
+  type StaleHotspotSession,
 } from '@mtk/types';
 import type { CurrentUserType } from '../common/types.js';
 import { DB_PORT, type DbPort } from '../db/database.port.js';
@@ -59,6 +61,80 @@ import type {
   UpdateUserProfileDto,
   UpdateWalledGardenDto,
 } from './dto/hotspot.dto.js';
+
+/**
+ * MAC-lock helpers.
+ *
+ * RouterOS has NO native user↔MAC pin on /ip/hotspot/user, so a "MAC lock" is
+ * a platform-side construct:
+ *  1. the MAC is stored on the user/profile row (source of truth);
+ *  2. a visible `/ip/hotspot/ip-binding` entry (type=regular) is created so
+ *     the lock shows up on-device and in audits;
+ *  3. real enforcement happens in the worker: `findStaleSessions()` flags
+ *     sessions whose MAC differs from the pinned MAC, and the enforcer acts
+ *     on the flag (disable / notify per expiryMode).
+ *
+ * NOTE: @mtk/ros-api has no ip-binding builder yet (out of scope for this
+ * change) — these two inline sentences MUST move there when it gains one.
+ */
+function ipBindingAddSentence(mac: string, username: string): string[] {
+  return [
+    '/ip/hotspot/ip-binding/add',
+    '=type=regular',
+    `=mac-address=${mac}`,
+    '=server=all',
+    `=comment=panel-maclock:${username}`,
+  ];
+}
+
+/** Normalize a MAC for comparison (case/separator-insensitive). */
+export function normalizeMac(mac: string): string {
+  return mac.trim().toUpperCase().replace(/[^0-9A-F]/g, '');
+}
+
+const MAC_RE = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
+
+function validateMac(mac: string, what: string): string {
+  if (!MAC_RE.test(mac.trim())) {
+    throw new UnprocessableEntityException(`${what} must look like AA:BB:CC:DD:EE:FF, got "${mac}"`);
+  }
+  return normalizeMac(mac).replace(/(..)(?=..)/g, '$1:');
+}
+
+/** Which expiry clock fired for a user, if any. Pure — unit-testable. */
+export interface UserExpiry {
+  /** Absolute `expiresAt` clock. */
+  absolute: Date | null;
+  /** First-login validity clock (`firstLoginAt + validitySeconds`). */
+  validity: Date | null;
+  /** The clock that already passed (earliest), or null when not expired. */
+  expiredAt: Date | null;
+  expiryKind: 'absolute' | 'validity' | null;
+}
+
+export function computeUserExpiry(u: {
+  expiresAt: Date | null;
+  validityFromFirstLogin: boolean;
+  validitySeconds: number | null;
+  firstLoginAt: Date | null;
+}, now: Date = new Date()): UserExpiry {
+  const absolute = u.expiresAt;
+  const validity =
+    u.validityFromFirstLogin && u.validitySeconds && u.firstLoginAt
+      ? new Date(u.firstLoginAt.getTime() + u.validitySeconds * 1000)
+      : null;
+  const passed: Array<{ at: Date; kind: 'absolute' | 'validity' }> = [];
+  if (absolute && absolute <= now) passed.push({ at: absolute, kind: 'absolute' });
+  if (validity && validity <= now) passed.push({ at: validity, kind: 'validity' });
+  passed.sort((a, b) => a.at.getTime() - b.at.getTime());
+  const first = passed[0];
+  return {
+    absolute,
+    validity,
+    expiredAt: first?.at ?? null,
+    expiryKind: first?.kind ?? null,
+  };
+}
 
 /**
  * Hotspot v1 — full CRUD for servers, server-profiles, user-profiles (plans),
@@ -280,6 +356,7 @@ export class HotspotService {
     await this.routerOrThrow(routerId);
     const dupe = await this.db.hotspotUserProfiles.findFirst({ routerId, name: dto.name });
     if (dupe) throw new UnprocessableEntityException(`user profile "${dto.name}" already exists`);
+    const macAddress = dto.macAddress !== undefined ? validateMac(dto.macAddress, 'macAddress') : null;
     const row = await this.db.hotspotUserProfiles.create({
       routerId,
       name: dto.name,
@@ -290,6 +367,11 @@ export class HotspotService {
       keepaliveTimeout: dto.keepaliveTimeout ?? null,
       quotaBytes: dto.quotaBytes !== undefined ? BigInt(dto.quotaBytes) : null,
       quotaSeconds: dto.quotaSeconds ?? null,
+      macAddress,
+      limitUptime: dto.limitUptime ?? null,
+      validitySeconds: dto.validitySeconds ?? null,
+      price: dto.price ?? null,
+      expiryMode: dto.expiryMode ?? 'none',
     });
     const enq = await this.mutate(routerId, 'hotspot.user-profile.create', [
       hotspotProfileAdd({
@@ -316,6 +398,13 @@ export class HotspotService {
         keepaliveTimeout: dto.keepaliveTimeout,
         quotaBytes: dto.quotaBytes !== undefined ? BigInt(dto.quotaBytes) : undefined,
         quotaSeconds: dto.quotaSeconds,
+        macAddress: dto.macAddress !== undefined
+          ? (dto.macAddress ? validateMac(dto.macAddress, 'macAddress') : null)
+          : undefined,
+        limitUptime: dto.limitUptime,
+        validitySeconds: dto.validitySeconds,
+        price: dto.price,
+        expiryMode: dto.expiryMode,
       }).filter(([, v]) => v !== undefined)),
     );
     const enq = await this.mutate(routerId, 'hotspot.user-profile.update', [
@@ -360,12 +449,14 @@ export class HotspotService {
 
   // ------------------------------------------------------------------- users --
 
-  async listUsers(routerId: string, opts: { page?: number; pageSize?: number; disabled?: boolean } = {}): Promise<Paginated<HotspotUser>> {
+  async listUsers(routerId: string, opts: { page?: number; pageSize?: number; disabled?: boolean; mode?: string; batchId?: string } = {}): Promise<Paginated<HotspotUser>> {
     await this.routerOrThrow(routerId);
     const page = opts.page ?? 1;
     const pageSize = Math.min(opts.pageSize ?? 50, 500);
     const where: Record<string, unknown> = { routerId };
     if (opts.disabled !== undefined) where.disabled = opts.disabled;
+    if (opts.mode) where.mode = opts.mode;
+    if (opts.batchId) where.batchId = opts.batchId;
     const total = await this.db.hotspotUsers.count(where);
     const rows = await this.db.hotspotUsers.findMany({
       where, orderBy: { name: 'asc' }, skip: (page - 1) * pageSize, take: pageSize,
@@ -379,6 +470,25 @@ export class HotspotService {
     };
   }
 
+  /**
+   * Worker sweep input: EVERY hotspot user on the router (unpaginated),
+   * including all expiry fields (`expiryMode`, `expiresAt`,
+   * `validityFromFirstLogin`, `validitySeconds`, `firstLoginAt`).
+   * Served at GET /internal/worker/routers/:id/hotspot-users.
+   * Unknown router → NotFoundException (the sweep treats 404 as empty).
+   */
+  async listUsersInternal(routerId: string): Promise<HotspotUser[]> {
+    await this.routerOrThrow(routerId);
+    const rows = await this.db.hotspotUsers.findMany({
+      where: { routerId },
+      orderBy: { name: 'asc' },
+    });
+    const profiles = new Map(
+      (await this.db.hotspotUserProfiles.findMany({ where: { routerId } })).map((p) => [p.id, p.name]),
+    );
+    return rows.map((r) => toUserDto(r, profiles.get(r.profileId ?? '') ?? null));
+  }
+
   async createUser(routerId: string, dto: CreateHotspotUserDto, actor?: CurrentUserType) {
     await this.routerOrThrow(routerId);
     const dupe = await this.db.hotspotUsers.findFirst({ routerId, name: dto.name });
@@ -387,17 +497,35 @@ export class HotspotService {
     let passwordRef: string | null = null;
     if (dto.password) passwordRef = await this.vault.store(dto.password);
 
-    const profileName = await this.resolveProfileName(routerId, dto.profileId, dto.profileName);
+    const profile = await this.resolveProfileRow(routerId, dto.profileId, dto.profileName);
+    const profileName = profile?.name ?? dto.profileName ?? null;
+    // Explicit per-field inheritance: dto wins, profile fills gaps, so the
+    // validity clock and the session cap never get conflated.
+    const macAddress = dto.macAddress !== undefined
+      ? validateMac(dto.macAddress, 'macAddress')
+      : profile?.macAddress ?? null;
+    const limitUptime = dto.limitUptime ?? profile?.limitUptime ?? undefined;
+    const validitySeconds = dto.validitySeconds ?? profile?.validitySeconds ?? null;
+    const validityFromFirstLogin = dto.validityFromFirstLogin ?? false;
+    const expiryMode = dto.expiryMode ?? (profile?.expiryMode as HotspotExpiryMode | undefined) ?? 'none';
+
     const row = await this.db.hotspotUsers.create({
       routerId,
       name: dto.name,
       passwordRef,
       profileId: dto.profileId ?? null,
+      mode: null,
+      batchId: null,
+      validityFromFirstLogin,
+      validitySeconds,
+      limitUptime: limitUptime ?? null,
+      macAddress,
+      expiryMode,
       disabled: dto.disabled ?? false,
       expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
       comment: dto.comment ?? null,
     });
-    const enq = await this.mutate(routerId, 'hotspot.user.create', [
+    const sentences: string[][] = [
       hotspotUserAdd({
         server: dto.server ?? 'all',
         name: dto.name,
@@ -405,14 +533,16 @@ export class HotspotService {
         profile: profileName ?? undefined,
         comment: dto.comment,
         disabled: dto.disabled,
-        limitUptime: dto.limitUptime,
+        limitUptime,
         limitBytesTotal: dto.limitBytesTotal,
       }),
-    ], {
+    ];
+    if (macAddress) sentences.push(ipBindingAddSentence(macAddress, dto.name));
+    const enq = await this.mutate(routerId, 'hotspot.user.create', sentences, {
       actor,
       opId: dto.opId,
       // Redacted: the audit never carries the plaintext password.
-      after: { name: dto.name, profile: profileName, passwordSet: !!dto.password },
+      after: { name: dto.name, profile: profileName, passwordSet: !!dto.password, macLocked: !!macAddress },
       entity: { table: 'hotspot', id: row.id },
     });
     return { user: toUserDto(row, profileName), ...enq };
@@ -427,7 +557,14 @@ export class HotspotService {
       if (dto.password) passwordRef = await this.vault.store(dto.password);
       else passwordRef = null;
     }
-    const profileName = await this.resolveProfileName(routerId, dto.profileId, dto.profileName);
+    const profile = await this.resolveProfileRow(routerId, dto.profileId, dto.profileName);
+    const profileName = profile?.name ?? dto.profileName ?? null;
+    // A changed MAC gets a fresh binding entry; the stale one is left for the
+    // reconciliation GC (we don't track ip-binding mirror rows).
+    const macChanged = dto.macAddress !== undefined && normalizeMac(dto.macAddress) !== normalizeMac(row.macAddress ?? '');
+    const macAddress = dto.macAddress !== undefined
+      ? (dto.macAddress ? validateMac(dto.macAddress, 'macAddress') : null)
+      : undefined;
     const updated = await this.db.hotspotUsers.update(
       { id },
       Object.fromEntries(Object.entries({
@@ -436,9 +573,14 @@ export class HotspotService {
         disabled: dto.disabled,
         comment: dto.comment ?? undefined,
         expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : undefined,
+        validityFromFirstLogin: dto.validityFromFirstLogin,
+        validitySeconds: dto.validitySeconds,
+        limitUptime: dto.limitUptime,
+        macAddress,
+        expiryMode: dto.expiryMode,
       }).filter(([, v]) => v !== undefined)),
     );
-    const enq = await this.mutate(routerId, 'hotspot.user.update', [
+    const sentences: string[][] = [
       hotspotUserSet(deviceId, {
         password: dto.password || undefined,
         profile: profileName ?? undefined,
@@ -447,11 +589,14 @@ export class HotspotService {
         limitUptime: dto.limitUptime,
         limitBytesTotal: dto.limitBytesTotal,
       }),
-    ], {
+    ];
+    const effectiveMac = macAddress !== undefined ? macAddress : row.macAddress;
+    if (macChanged && effectiveMac) sentences.push(ipBindingAddSentence(effectiveMac, row.name));
+    const enq = await this.mutate(routerId, 'hotspot.user.update', sentences, {
       actor,
       opId: dto.opId,
       before: { disabled: row.disabled, profileId: row.profileId },
-      after: { disabled: dto.disabled, profile: profileName, passwordSet: dto.password !== undefined },
+      after: { disabled: dto.disabled, profile: profileName, passwordSet: dto.password !== undefined, macLocked: !!effectiveMac },
       entity: { table: 'hotspot', id },
     });
     return { user: toUserDto(updated, profileName), ...enq };
@@ -488,22 +633,72 @@ export class HotspotService {
     return row;
   }
 
+  private async resolveProfileRow(
+    routerId: string,
+    profileId?: string,
+    profileName?: string,
+  ): Promise<HotspotUserProfileRow | null> {
+    if (profileId) {
+      const p = await this.db.hotspotUserProfiles.findUnique({ id: profileId });
+      if (!p || p.routerId !== routerId) throw new NotFoundException(`user profile ${profileId} not found`);
+      return p;
+    }
+    if (profileName) {
+      return this.db.hotspotUserProfiles.findFirst({ routerId, name: profileName });
+    }
+    return null;
+  }
+
   private async resolveProfileName(
     routerId: string,
     profileId?: string,
     profileName?: string,
   ): Promise<string | null> {
-    if (profileId) {
-      const p = await this.db.hotspotUserProfiles.findUnique({ id: profileId });
-      if (!p || p.routerId !== routerId) throw new NotFoundException(`user profile ${profileId} not found`);
-      return p.name;
-    }
-    return profileName ?? null;
+    return (await this.resolveProfileRow(routerId, profileId, profileName))?.name ?? profileName ?? null;
   }
 
   /** Trigger a quota-enforcer run for this router (audited, queued). */
   async enforceQuota(routerId: string, actor?: CurrentUserType): Promise<EnqueuedCommand> {
     return this.commands.enqueueQuota(routerId, actor);
+  }
+
+  /**
+   * "Expired but still connected" detection.
+   *
+   * Joins platform users past expiry (EITHER the absolute `expiresAt` clock
+   * OR the first-login validity clock — see {@link computeUserExpiry}) with
+   * the worker-reported active sessions. Returns the data the worker's
+   * expiry/alert pipeline consumes; this method takes no action itself.
+   * Also flags MAC mismatches for MAC-pinned users.
+   */
+  async findStaleSessions(routerId: string, now: Date = new Date()): Promise<StaleHotspotSession[]> {
+    await this.routerOrThrow(routerId);
+    const [users, sessions] = await Promise.all([
+      this.db.hotspotUsers.findMany({ where: { routerId, disabled: false } }),
+      this.db.hotspotActiveSessions.findMany({ where: { routerId } }),
+    ]);
+    const byName = new Map(users.map((u) => [u.name, u]));
+    const stale: StaleHotspotSession[] = [];
+    for (const s of sessions) {
+      const user = byName.get(s.username);
+      if (!user) continue; // session for an unknown/deleted user — not ours to judge
+      const { expiredAt, expiryKind } = computeUserExpiry(user, now);
+      if (!expiredAt || !expiryKind) continue;
+      const macMismatch =
+        !!user.macAddress && !!s.macAddress &&
+        normalizeMac(user.macAddress) !== normalizeMac(s.macAddress);
+      stale.push({
+        userId: user.id,
+        routerId,
+        username: user.name,
+        expiredAt: expiredAt.toISOString(),
+        expiryKind,
+        sessionIp: s.address,
+        sessionMac: s.macAddress,
+        macMismatch,
+      });
+    }
+    return stale;
   }
 
   // ------------------------------------------------------------ walled garden --
@@ -640,6 +835,9 @@ function toUserProfileDto(r: HotspotUserProfileRow): HotspotUserProfile {
     idleTimeout: r.idleTimeout, keepaliveTimeout: r.keepaliveTimeout,
     quotaBytes: r.quotaBytes === null ? null : String(r.quotaBytes),
     quotaSeconds: r.quotaSeconds, mikrotikId: r.mikrotikId,
+    macAddress: r.macAddress, limitUptime: r.limitUptime,
+    validitySeconds: r.validitySeconds, price: r.price,
+    expiryMode: r.expiryMode as HotspotExpiryMode,
   };
 }
 
@@ -652,6 +850,14 @@ function toUserDto(r: HotspotUserRow, profileName: string | null): HotspotUser {
     bytesIn: String(r.bytesIn),
     bytesOut: String(r.bytesOut),
     expiresAt: r.expiresAt ? r.expiresAt.toISOString() : null,
+    mode: (r.mode ?? null) as HotspotUser['mode'],
+    batchId: r.batchId,
+    validityFromFirstLogin: r.validityFromFirstLogin,
+    validitySeconds: r.validitySeconds,
+    limitUptime: r.limitUptime,
+    firstLoginAt: r.firstLoginAt ? r.firstLoginAt.toISOString() : null,
+    macAddress: r.macAddress,
+    expiryMode: r.expiryMode as HotspotExpiryMode,
     comment: r.comment,
     mikrotikId: r.mikrotikId,
     createdAt: r.createdAt.toISOString(),

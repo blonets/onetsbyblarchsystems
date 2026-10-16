@@ -48,6 +48,57 @@ class HeartbeatDto {
   cause?: string;
 }
 
+class SessionReportDto {
+  @IsString()
+  username!: string;
+
+  @IsOptional()
+  @IsString()
+  address?: string;
+
+  @IsOptional()
+  @IsString()
+  macAddress?: string;
+
+  @IsOptional()
+  @IsString()
+  uptime?: string;
+
+  @IsOptional()
+  @IsString()
+  server?: string;
+}
+
+class SessionsIngestDto {
+  @IsString()
+  routerId!: string;
+
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SessionReportDto)
+  sessions!: SessionReportDto[];
+}
+
+class SessionSearchQuery {
+  @IsOptional()
+  @IsString()
+  username?: string;
+
+  @IsOptional()
+  @IsString()
+  ip?: string;
+}
+
+class BulkSelectorDto {
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  routerIds?: string[];
+
+  @IsOptional()
+  @IsString()
+  tag?: string;
+}
 class MetricsQuery {
   @IsIn(['cpu', 'mem', 'traffic', 'hotspot_active'])
   type!: MetricType;
@@ -122,5 +173,52 @@ export class MonitoringController {
   @HttpCode(200)
   heartbeat(@Param('routerId') routerId: string, @Body() dto: HeartbeatDto) {
     return this.monitoring.heartbeat(routerId, { status: dto.status, cause: dto.cause });
+  }
+
+  /**
+   * Worker/internal: replace the router's reported active hotspot sessions
+   * wholesale (poller reports the full /ip/hotspot/active list each cycle).
+   */
+  @Post('internal/monitoring/sessions')
+  @Public()
+  @Internal()
+  @HttpCode(202)
+  ingestSessions(@Body() dto: SessionsIngestDto) {
+    return this.monitoring.ingestSessions(dto.routerId, dto.sessions).then((r) => ({ accepted: true, ...r }));
+  }
+
+  /**
+   * Session lookup: which router(s) a user is online on, by username and/or
+   * IP. Aggregates worker-reported active sessions. At least one of
+   * `username` / `ip` is required.
+   */
+  @Get('monitoring/sessions/search')
+  @Roles('technician')
+  searchSessions(@Query() q: SessionSearchQuery) {
+    if (!q.username && !q.ip) {
+      throw new BadRequestException('username or ip is required');
+    }
+    return this.monitoring.searchSessions({ username: q.username, ip: q.ip });
+  }
+
+  /**
+   * Revenue tile: voucher-mode first-logins today × profile face value
+   * (unset price counts as 0 — never faked).
+   */
+  @Get('monitoring/revenue/today')
+  @Roles('technician')
+  revenueToday() {
+    return this.monitoring.revenueToday();
+  }
+
+  /**
+   * Bulk status read over a router selector ({ routerIds?, tag? }).
+   * Per-router results — one failure never stops the rest.
+   */
+  @Post('monitoring/bulk/status')
+  @Roles('technician')
+  @HttpCode(200)
+  bulkStatus(@Body() dto: BulkSelectorDto) {
+    return this.monitoring.bulkStatus({ routerIds: dto.routerIds, tag: dto.tag });
   }
 }

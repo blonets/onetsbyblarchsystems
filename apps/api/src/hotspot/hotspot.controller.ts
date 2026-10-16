@@ -1,10 +1,11 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query } from '@nestjs/common';
-import { IsBoolean, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional, IsString } from 'class-validator';
 import { Roles } from '../auth/decorators/roles.decorator.js';
 import { PaginationQuery } from '../common/dto/pagination.dto.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import type { CurrentUserType } from '../common/types.js';
 import {
+  CreateHotspotBatchDto,
   CreateHotspotServerDto,
   CreateHotspotUserDto,
   CreateServerProfileDto,
@@ -16,12 +17,21 @@ import {
   UpdateUserProfileDto,
   UpdateWalledGardenDto,
 } from './dto/hotspot.dto.js';
+import { HotspotBatchService } from './hotspot-batch.service.js';
 import { HotspotService } from './hotspot.service.js';
 
 class UserQuery extends PaginationQuery {
   @IsOptional()
   @IsBoolean()
   disabled?: boolean;
+
+  @IsOptional()
+  @IsIn(['up', 'vc'])
+  mode?: 'up' | 'vc';
+
+  @IsOptional()
+  @IsString()
+  batchId?: string;
 }
 
 class WalledGardenQuery {
@@ -38,7 +48,10 @@ class WalledGardenQuery {
 @Controller('routers/:routerId/hotspot')
 @Roles('technician')
 export class HotspotController {
-  constructor(private readonly hotspot: HotspotService) {}
+  constructor(
+    private readonly hotspot: HotspotService,
+    private readonly batches: HotspotBatchService,
+  ) {}
 
   // ------------------------------------------------------------- servers --
 
@@ -155,7 +168,38 @@ export class HotspotController {
 
   @Get('users')
   listUsers(@Param('routerId') routerId: string, @Query() q: UserQuery) {
-    return this.hotspot.listUsers(routerId, { page: q.page, pageSize: q.pageSize, disabled: q.disabled });
+    return this.hotspot.listUsers(routerId, { page: q.page, pageSize: q.pageSize, disabled: q.disabled, mode: q.mode, batchId: q.batchId });
+  }
+
+  /**
+   * Batch-generate credentials (`up` = username+random password,
+   * `vc` = voucher code). One BullMQ job, idempotent by opId; every user
+   * comment is encoded `vc-<batchId>-<YYYYMMDD>-<note>`.
+   */
+  @Roles('operator')
+  @Post('users/batch')
+  @HttpCode(201)
+  createBatch(
+    @Param('routerId') routerId: string,
+    @Body() dto: CreateHotspotBatchDto,
+    @CurrentUser() actor: CurrentUserType,
+  ) {
+    return this.batches.generateBatch(routerId, dto, actor);
+  }
+
+  @Get('users/batches')
+  listBatches(@Param('routerId') routerId: string) {
+    return this.batches.listBatches(routerId);
+  }
+
+  /**
+   * Expired-but-still-connected detection: users past expiry (absolute or
+   * first-login validity) with active sessions. Read model for the worker's
+   * expiry/alert pipeline.
+   */
+  @Get('stale-sessions')
+  findStaleSessions(@Param('routerId') routerId: string) {
+    return this.hotspot.findStaleSessions(routerId);
   }
 
   @Roles('operator')
