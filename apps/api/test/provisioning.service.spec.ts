@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Transport } from '@mtk/ros-api';
+import { AuditService } from '../src/audit/audit.service.js';
+import { InMemoryDatabase } from '../src/db/in-memory-database.js';
+import { EventsService } from '../src/events/events.module.js';
+import { InMemoryJobs } from '../src/jobs/jobs.module.js';
+import { InMemoryVault } from '../src/vault/vault.port.js';
 import {
   allocateTunnelIp,
   generateRouterCredentials,
@@ -91,83 +96,177 @@ describe('issueOnboardingToken', () => {
     expect(t.expiresAt).toBe(new Date(now + 24 * 3_600_000).toISOString());
   });
 });
+/** Wiring for service-level tests: real service, fake DB/vault/jobs, fake transport. */
+function makeService(
+  respond: (sent: string[]) => string[][] = () => [['!done']],
+  hubHost = 'vpn.onetsbyblarch.online',
+) {
+  const transports: FakeTransport[] = [];
+  const db = new InMemoryDatabase();
+  const vault = new InMemoryVault();
+  const jobs = new InMemoryJobs();
+  const events = new EventsService();
+  const audit = new AuditService(db);
+  const svc = new ProvisioningService(
+    {
+      hubHost,
+      hubPort: 8728,
+      hubUsername: 'api',
+      hubPassword: 'pw',
+      hubPppProfile: 'sstp-profile',
+      panelHost: 'admin.onetsbyblarch.online',
+    },
+    db,
+    vault,
+    jobs,
+    events,
+    audit,
+    (_host, _port) => {
+      const t = new FakeTransport(respond);
+      transports.push(t);
+      return t;
+    },
+  );
+  return { svc, db, vault, jobs, events, transports };
+}
 
-describe('ProvisioningService.provisionRouterOnHub', () => {
-  it('logs into the hub and adds the /ppp secret — no network', async () => {
-    const transports: FakeTransport[] = [];
-    const svc = new ProvisioningService(
-      { hubHost: 'hub.test', hubPort: 8728, hubUsername: 'api', hubPassword: 'pw' },
-      (host, port) => {
-        expect(host).toBe('hub.test');
-        expect(port).toBe(8728);
-        const t = new FakeTransport();
-        transports.push(t);
-        return t;
-      },
-    );
+const ACTOR = { sub: 'user-1', email: 'tech@example.com', role: 'technician', roles: ['technician'] };
 
-    await svc.provisionRouterOnHub({
-      routerUuid: 'uuid-1',
-      sstpUsername: 'sstp-abc123',
-      sstpPassword: 'secret-pw',
-      tunnelIp: '10.200.0.7',
-    });
+async function seedUser(db: InMemoryDatabase): Promise<void> {
+  const role = await db.roles.create({ name: 'technician', description: null });
+  await db.users.create({
+    id: 'user-1',
+    email: 'tech@example.com',
+    name: 'Tech',
+    passwordHash: 'x',
+    roleId: role.id,
+  });
+}
 
+describe('ProvisioningService.issueToken', () => {
+  it('mints credentials, creates the hub secret, persists the token — never returns passwords', async () => {
+    const { svc, db, transports } = makeService();
+    await seedUser(db);
+
+    const result = await svc.issueToken({}, ACTOR);
+
+    expect(result.sstpUsername).toMatch(/^sstp-[0-9a-f]{12}$/);
+    expect(result.tunnelIp).toBe('10.200.0.2');
+    expect(result.token).toMatch(/^[0-9a-f]{64}$/);
+    expect(result).not.toHaveProperty('sstpPassword');
+    expect(result).not.toHaveProperty('apiPassword');
+    expect(result.fetchCommand).toContain(`/api/v1/onboard/${result.token}/onboard.rsc`);
+
+    // 15-minute TTL
+    const ttlMs = new Date(result.expiresAt).getTime() - Date.now();
+    expect(ttlMs).toBeGreaterThan(14 * 60_000);
+    expect(ttlMs).toBeLessThanOrEqual(15 * 60_000);
+
+    // hub got login + /ppp/secret/add with the live-validated profile
     const sent = transports[0]!.sent;
-    // 1. modern login against the hub API user
-    expect(sent[0]).toEqual(['/login', '=name=api', '=password=pw']);
-    // 2. the hub-side SSTP secret with static tunnel IP + uuid comment
-    expect(sent[1]).toEqual([
-      '/ppp/secret/add',
-      '=name=sstp-abc123',
-      '=password=secret-pw',
-      '=service=sstp',
-      '=profile=default',
-      '=remote-address=10.200.0.7',
-      '=comment=panel-router:uuid-1',
-    ]);
-    // 3. connection closed afterwards
+    expect(sent[0]![0]).toBe('/login');
+    const add = sent[1]!;
+    expect(add[0]).toBe('/ppp/secret/add');
+    expect(add).toContain(`=name=${result.sstpUsername}`);
+    expect(add).toContain('=service=sstp');
+    expect(add).toContain('=profile=sstp-profile');
+    expect(add).toContain(`=remote-address=${result.tunnelIp}`);
     expect(transports[0]!.isConnected()).toBe(false);
+
+    // token row persisted with vault refs (never plaintext)
+    const row = await db.onboardingTokens.findUnique({ token: result.token });
+    expect(row).not.toBeNull();
+    expect(row!.sstpPasswordRef).toMatch(/^mem:/);
+    expect(row!.usedAt).toBeNull();
   });
 
   it('propagates hub-side failures', async () => {
-    const svc = new ProvisioningService(
-      { hubHost: 'hub.test', hubPort: 8728, hubUsername: 'api', hubPassword: 'pw' },
-      () => new FakeTransport(() => [['!trap', '=message=no such command prefix']]),
-    );
-    await expect(
-      svc.provisionRouterOnHub({
-        routerUuid: 'uuid-1',
-        sstpUsername: 'sstp-x',
-        sstpPassword: 'pw',
-        tunnelIp: '10.200.0.9',
-      }),
-    ).rejects.toThrow(/no such command prefix/);
+    // Live-verified device contract: a failed command sends `!trap` BEFORE the
+    // final `!done` — the fake must script both, otherwise talkRaw() blocks on
+    // the missing terminator.
+    const { svc, db } = makeService(() => [
+      ['!trap', '=message=no such command prefix'],
+      ['!done'],
+    ]);
+    await seedUser(db);
+    await expect(svc.issueToken({}, ACTOR)).rejects.toThrow(/no such command prefix/);
   });
 });
 
-describe('ProvisioningService.provisionNewRouter', () => {
-  it('orchestrates credentials + IP + hub secret, never returning the password', async () => {
-    const transports: FakeTransport[] = [];
-    const svc = new ProvisioningService(
-      { hubHost: 'hub.test', hubPort: 8728, hubUsername: 'api', hubPassword: 'pw' },
-      () => {
-        const t = new FakeTransport();
-        transports.push(t);
-        return t;
-      },
-    );
+describe('ProvisioningService hub-secret safety', () => {
+  it('refuses to delete the protected sstp-test-01 secret', async () => {
+    const { svc, transports } = makeService();
+    await expect(svc.deleteHubSecretByName('sstp-test-01')).rejects.toThrow(/protected/);
+    expect(transports).toHaveLength(0); // never even dialed the hub
+  });
 
-    const result = await svc.provisionNewRouter({
-      routerUuid: 'uuid-9',
-      usedTunnelIps: ['10.200.0.2', '10.200.0.3'],
+  it('refuses unmanaged secret names', async () => {
+    const { svc, transports } = makeService();
+    await expect(svc.deleteHubSecretByName('admin')).rejects.toThrow(/unmanaged/);
+    expect(transports).toHaveLength(0);
+  });
+
+  it('creates disposable test secrets with the test-del- prefix', async () => {
+    const { svc, transports } = makeService();
+    const { name, tunnelIp } = await svc.createDisposableTestSecret();
+    expect(name).toMatch(/^test-del-[0-9a-f]{6}$/);
+    expect(tunnelIp).toBe('10.200.0.2');
+    const add = transports[0]!.sent[1]!;
+    expect(add).toContain(`=name=${name}`);
+  });
+});
+
+describe('ProvisioningService onboarding flow', () => {
+  it('renders onboard.rsc against the DNS hub address and completes the callback', async () => {
+    const { svc, db, jobs, events } = makeService();
+    await seedUser(db);
+
+    const issued = await svc.issueToken({}, ACTOR);
+    const script = await svc.getOnboardScript(issued.token);
+
+    // DNS-parameterized: no hardcoded IP in generated artifacts
+    expect(script).toContain('connect-to="vpn.onetsbyblarch.online"');
+    expect(script).not.toContain('34.91.70.17');
+    expect(script).toContain(`/api/v1/onboard/${issued.token}/callback`);
+    expect(script).toContain('panel-uuid=');
+
+    const onlineEvents: unknown[] = [];
+    events.onEvent('router.online', (p) => onlineEvents.push(p));
+
+    const { routerId } = await svc.handleCallback(issued.token, {
+      uuid: 'router-uuid-1',
+      version: '6.49.17',
+      board: 'CHR',
     });
 
-    expect(result.sstpUsername).toMatch(/^sstp-[0-9a-f]{12}$/);
-    expect(result.tunnelIp).toBe('10.200.0.4');
-    expect(result).not.toHaveProperty('sstpPassword');
-    const pppAdd = transports[0]!.sent[1]!;
-    expect(pppAdd).toContain('=remote-address=10.200.0.4');
-    expect(pppAdd).toContain('=comment=panel-router:uuid-9');
+    const router = await db.routers.findUnique({ id: routerId });
+    expect(router).not.toBeNull();
+    expect(router!.uuid).toBe('router-uuid-1');
+    expect(router!.tunnelIp).toBe(issued.tunnelIp);
+    expect(router!.status).toBe('online');
+    expect(router!.sstpPasswordRef).toMatch(/^mem:/);
+
+    // token burned
+    const tokenRow = await db.onboardingTokens.findUnique({ token: issued.token });
+    expect(tokenRow!.usedAt).not.toBeNull();
+    expect(tokenRow!.routerId).toBe(routerId);
+
+    // bus event + worker job
+    expect(onlineEvents).toHaveLength(1);
+    const pending = jobs.pending('provision');
+    expect(pending.map((j) => j.name)).toContain('verify-tunnel');
+
+    // duplicate callback is idempotent
+    const retry = await svc.handleCallback(issued.token, { uuid: 'router-uuid-1' });
+    expect(retry.routerId).toBe(routerId);
+  });
+
+  it('rejects burned or expired tokens', async () => {
+    const { svc, db } = makeService();
+    await seedUser(db);
+    const issued = await svc.issueToken({}, ACTOR);
+    await db.onboardingTokens.update({ token: issued.token }, { usedAt: new Date() });
+    await expect(svc.getOnboardScript(issued.token)).rejects.toThrow(/unknown or burned/);
+    await expect(svc.handleCallback(issued.token, { uuid: 'x' })).rejects.toThrow(/unknown or burned/);
   });
 });
