@@ -1,0 +1,109 @@
+# Dokploy compose for the MikroTik fleet platform.
+#
+# Everything is env-driven — NO secrets are committed here. Set the values in
+# the Dokploy environment UI (or a .env file that is never committed):
+#   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL,
+#   REDIS_URL, JWT_SECRET, JWT_EXPIRES_IN, API_PORT,
+#   SSTP_HUB_HOST, SSTP_HUB_API_PORT, SSTP_HUB_API_USER, SSTP_HUB_API_PASSWORD,
+#   TUNNEL_SUPERNET, TUNNEL_HUB_IP,
+#   NEXT_PUBLIC_API_URL, WORKER_SHARD_INDEX, WORKER_SHARD_COUNT, POLL_INTERVAL_MS
+#
+# TimescaleDB: the image ships the extension preinstalled. Enable it per
+# database once (migration step, also noted in apps/api/prisma/schema.prisma):
+#   CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+name: mtk-fleet
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      API_PORT: ${API_PORT:-3001}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-3600}
+      SSTP_HUB_HOST: ${SSTP_HUB_HOST}
+      SSTP_HUB_API_PORT: ${SSTP_HUB_API_PORT:-8728}
+      SSTP_HUB_API_USER: ${SSTP_HUB_API_USER}
+      SSTP_HUB_API_PASSWORD: ${SSTP_HUB_API_PASSWORD}
+      TUNNEL_SUPERNET: ${TUNNEL_SUPERNET:-10.200.0.0/16}
+      TUNNEL_HUB_IP: ${TUNNEL_HUB_IP:-10.200.0.1}
+    ports:
+      - '${API_PORT:-3001}:${API_PORT:-3001}'
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      SSTP_HUB_HOST: ${SSTP_HUB_HOST}
+      SSTP_HUB_API_PORT: ${SSTP_HUB_API_PORT:-8728}
+      WORKER_SHARD_INDEX: ${WORKER_SHARD_INDEX:-0}
+      WORKER_SHARD_COUNT: ${WORKER_SHARD_COUNT:-1}
+      POLL_INTERVAL_MS: ${POLL_INTERVAL_MS:-60000}
+    deploy:
+      # scale workers out and give each replica its own WORKER_SHARD_INDEX
+      replicas: 1
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    ports:
+      - '3000:3000'
+
+volumes:
+  pgdata:
+  redisdata:

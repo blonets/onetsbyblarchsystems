@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# @mtk/worker — BullMQ workers
+FROM node:24-slim AS base
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+WORKDIR /app
+
+FROM base AS builder
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.json ./
+COPY packages ./packages
+COPY apps/worker ./apps/worker
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @mtk/worker build
+RUN pnpm --filter @mtk/worker --prod deploy /prod/worker
+
+FROM node:24-slim AS runner
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=builder /prod/worker ./
+CMD ["node", "dist/main.js"]
