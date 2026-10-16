@@ -13,3 +13,14 @@ MikroTik documentation (manual.mikrotik.com / help.mikrotik.com, 2026-10-16):
 All credential slots are `:local` variables / `# CHANGE:` markers — no secrets in
 these scripts. Variables each operator must set are marked at the top of every
 file.
+
+## Hub address (`SSTP_HUB_HOST`)
+
+Every script takes the hub address from the `SSTP_HUB_HOST` environment
+variable — no file in this directory hardcodes an IP.
+
+- **Canonical:** `vpn.onetsbyblarch.online` (Cloudflare DNS → hub CHR).
+  DNS-based SSTP dialing was proven live on 2026-10-16 (test client on the DNS
+  name, tunnel up, 0% packet loss).
+- Underlying hub IP (docs reference only, never in templates): `34.91.70.17`.
+- Tunnel-side hub address (inside the tunnel, unchanged): `10.200.0.1`.

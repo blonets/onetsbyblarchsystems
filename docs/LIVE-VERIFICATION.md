@@ -9,6 +9,14 @@
 >   Telnet 8923, FTP 8921, WWW 8980. API port assumed default 8728 (confirm in item 1).
 > - Test site CHR (SSTP client target): `34.12.242.142` — default ports.
 >
+> DNS update 2026-10-16: canonical hub address is `vpn.onetsbyblarch.online`
+> (Cloudflare; `vpn` repointed to the hub CHR `34.91.70.17`). **CONFIRMED LIVE:**
+> `vpn.onetsbyblarch.online` resolves to the hub CHR, the test client was
+> switched to `connect-to=vpn.onetsbyblarch.online:443`, the tunnel
+> re-established and hub→client ping shows 0% loss — DNS-based SSTP dialing is
+> PROVEN. Every item below uses `SSTP_HUB_HOST=vpn.onetsbyblarch.online`
+> (underlying hub IP `34.91.70.17` noted for reference only).
+>
 > ⚠️ Credentials discipline: values are passed via environment variables at runtime
 > only (`SSTP_HUB_HOST`, per-router secrets from the vault). Nothing secret is written
 > here, in logs, or in git.

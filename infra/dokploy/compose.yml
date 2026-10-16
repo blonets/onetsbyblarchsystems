@@ -8,6 +8,10 @@
 #   TUNNEL_SUPERNET, TUNNEL_HUB_IP,
 #   NEXT_PUBLIC_API_URL, WORKER_SHARD_INDEX, WORKER_SHARD_COUNT, POLL_INTERVAL_MS
 #
+# SSTP_HUB_HOST: canonical vpn.onetsbyblarch.online — DNS-based SSTP dialing
+# proven live 2026-10-16. Never hardcode the hub IP in code; the underlying
+# hub IP (34.91.70.17) is documented for reference only.
+#
 # TimescaleDB: the image ships the extension preinstalled. Enable it per
 # database once (migration step, also noted in apps/api/prisma/schema.prisma):
 #   CREATE EXTENSION IF NOT EXISTS timescaledb;

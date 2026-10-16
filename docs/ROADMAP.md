@@ -89,6 +89,43 @@ pages. Existing modules are extended only via their public service interfaces.
    (new `capsman` module; reuses `provisioning` + `downstream`).
 5. **RADIUS plugin** — external auth/accounting for hotspot (new `radius` module;
    hotspot v1 keeps working standalone — RADIUS is an opt-in server-profile switch).
+6. **Downstream device drivers** — per-vendor config drivers behind the Phase 1
+   vendor-neutral `DeviceDriver` contract (new `drivers` module; vendors: RouterOS API,
+   OpenWrt UCI-over-SSH, DD-WRT, UniFi). Fleet reality: downstream is ~95% OpenWrt
+   (+ DD-WRT/Ubiquiti/Cisco); Phase 1 proxy-port access keeps working standalone —
+   drivers are opt-in per device.
+7. **CVE feed** — RouterOS security advisory tracking per fleet version; alert when a
+   managed router runs a version with known CVEs (new `cve` module; subscribes:
+   `router.online`, version inventory).
+8. **Backup health endpoint + diff** — per-router backup health status
+   (last success age, size drift) plus config diff between consecutive backups
+   (extends `backups` via its public interface; emits: `backup.unhealthy`).
+9. **Serial→suspect detection** — quarantine flow for duplicate/suspect router
+   identity (same UUID or serial seen from 2 tunnel IPs); operator approval gate,
+   audit-logged (extends `provisioning` + `routers`; emits: `router.suspect`).
+10. **Last-seen / last-check columns** — fleet-wide "last seen" and "last successful
+    check" columns with staleness highlighting on the routers table (web + API
+    read models; no new tables).
+11. **Metric threshold alert rules** — user-defined thresholds on polled metrics
+    (CPU %, memory %, interface errors, hotspot-active count) → `alert.raised`
+    (new `alerts` module; subscribes to metrics ingest).
+12. **panel-api permission self-check** — scheduled verification that every managed
+    router's `panel-api` user still has exactly the least-privilege policy set;
+    auto-remediate drift + alert (extends `provisioning`; emits: `config.drift`).
+13. **Upgrade orchestration** — staged RouterOS upgrades across the fleet
+    (canary → batches → all), with pre-upgrade backup gate and rollback on
+    failed health check (new `upgrades` module).
+14. **Central syslog** — per-router remote-logging configuration + centralized
+    log ingest, retention, and search (new `syslog` module).
+15. **Bulk CLI** — run an arbitrary allow-listed RouterOS command across a router
+    selection with per-router results and audit (extends `commands`; RBAC-gated,
+    superadmin/operator only).
+16. **Encrypted portability** — export/import the platform's own state
+    (routers, secrets references, config) as an encrypted bundle for panel
+    migration (new `portability` module; KMS-managed key).
+17. **Prometheus /metrics** — platform-internal metrics endpoint (queue depths,
+    poller lag, session counts, API latencies) for external monitoring
+    (extends `monitoring`; no new tables).
 
 **Entry criteria**
 - Phase 1 exit criteria verified; ≥10 production routers stable for 30 days.

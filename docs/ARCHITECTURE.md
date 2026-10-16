@@ -58,6 +58,11 @@ Status: **locked** (2026-10-16). Do not relitigate; extend, don't redesign.
 ### Addressing
 - Tunnel supernet: `10.200.0.0/16`
 - Hub tunnel-side address: `10.200.0.1/16` on the server side
+- Hub public address (SSTP dial-in, TCP 443): **canonical `vpn.onetsbyblarch.online`**
+  (Cloudflare DNS → hub CHR). DNS-based SSTP dialing was proven live on
+  2026-10-16 (test client on the DNS name, tunnel up, 0% packet loss), so
+  `SSTP_HUB_HOST` is the DNS name everywhere — onboarding artifacts, templates,
+  and docs. Underlying hub IP for reference only: `34.91.70.17`.
 - Every site router gets a **static** tunnel IP via `/ppp secret remote-address`
 - All management traffic (RouterOS API, backups, callbacks) flows **inside** the tunnel; the
   site router's LAN and WAN are never directly reachable from the platform.
@@ -66,8 +71,9 @@ Status: **locked** (2026-10-16). Do not relitigate; extend, don't redesign.
 - One outbound TCP connection (443) per router → passes through NAT, CGNAT, and most
   hotel/cafe firewalls (looks like HTTPS).
 - Hub address is referenced only by the env var `SSTP_HUB_HOST` on the routers' SSTP client
-  (`connect-to=$SSTP_HUB_HOST`). Panel and hub can move / get replaced without touching
-  a single site router.
+  (`connect-to=$SSTP_HUB_HOST`). Canonical value: `vpn.onetsbyblarch.online`
+  (underlying hub IP `34.91.70.17` for reference only). Panel and hub can
+  move / get replaced without touching a single site router.
 - Per-router identity = three linked anchors:
   1. `/ppp secret` name (= unique SSTP username)
   2. `remote-address` = static tunnel IP
@@ -99,6 +105,9 @@ Status: **locked** (2026-10-16). Do not relitigate; extend, don't redesign.
   - `ppp` — secret, active, profile (hub-side, used by provisioning)
   - `interface` — sstp-client, print/monitor
 - Every command carries a correlation id; `!trap`/`!fatal` responses map to typed errors.
+- **Protocol rule (verified live on 6.49.17): `!trap` is ALWAYS followed by `!done`.**
+  A client that stops reading at `!trap` desyncs the session (the trailing `!done`
+  is then misparsed as the next command's reply). Always consume through `!done`/`!fatal`.
 
 ### apps/api (NestJS)
 Modules: `auth` (JWT + RBAC roles: admin, operator, technician, viewer), `sites`,
@@ -150,9 +159,10 @@ tech gets one-time token in panel
       dst-path=onboard.rsc; /import onboard.rsc
   → tech pastes into router terminal (WinBox/SSH, admin)
   → router fetches generated onboard.rsc (token single-use, 15-min TTL)
-  → script: 1) /interface sstp-client add connect-to=$SSTP_HUB_HOST port=443
-               user=<sstp-user> password=<sstp-pass> profile=default-encryption
-               authentication=mschap2 tls-version=only-1.2 disabled=no
+  → script: 1) /interface sstp-client add connect-to=$SSTP_HUB_HOST user=<u> password=<p>
+               then /interface sstp-client set name=<n> verify-server-certificate=no disabled=no
+               (port travels inside connect-to as host:port — `port=` is an invalid
+               parameter on add AND set; verified live 2026-10-16)
             2) /user group add name=panel-api policy=read,write,api,rest-api,test,!sensitive,...
                /user add name=panel-api group=panel-api password=<random>
             3) identity set name=<site-slug> + /system note set note="panel-uuid=<uuid>"
@@ -186,10 +196,13 @@ poller shard (every 60 s per router, staggered) → API sentences over tunnel:
 ```
 BullMQ "backup" (daily, staggered 02:00–05:00 local) →
   /export file=<ts>.rsc ; /system/backup/save name=<ts>.backup
-  → /file/print → fetch via API → AES-256-GCM encrypt (KMS key) → object storage
+  → poll /file/print until <ts>.rsc appears (ignore <ts>.rsc.in_progress — not done yet)
+  → fetch via API → AES-256-GCM encrypt (KMS key) → object storage
   → Backup row (routerId, type, sizeBytes, sha256, retentionUntil)
   → restore: decrypt → /import (text) or /system/backup/load (binary) + reboot
 ```
+Note (verified live 6.49.17): bare `/export` returns just `!done` — the file flow above
+is the only fetch path.
 
 ### 3.5 Downstream device proxy
 ```
@@ -201,6 +214,16 @@ platform discovers via /ip/neighbor/print on site router
   → tech SSHes to <tunnelIP>:<P> (routed through hub → site router → LAN)
   → lifecycle managed: rules tagged by comment, garbage-collected on device delete
 ```
+
+**Fleet composition (confirmed 2026-10-16):** site EDGE routers are 100% MikroTik
+(SSTP tunnel + hotspot + internet resale) — the platform stays MikroTik-first.
+Downstream devices behind each site router: ~95% OpenWrt, small shares of DD-WRT /
+Ubiquiti, very little Cisco — all manageable via web/SSH, all important to the user.
+Phase 1 downstream = discovery + proxy-port access only (transport-agnostic).
+The downstream-device module keeps a vendor-neutral `DeviceDriver` contract
+(`vendor`, `model`, `mgmtMethods`; methods like `getStatus()`/`reboot()`/`backupConfig()`)
+so Phase 2 can land per-vendor drivers (RouterOS API / OpenWrt UCI-over-SSH /
+DD-WRT / UniFi) without touching the module.
 
 ## 4. Scaling plan to 1000+ routers
 
