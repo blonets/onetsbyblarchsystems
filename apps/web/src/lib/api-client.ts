@@ -25,6 +25,7 @@ import type {
   DownstreamDevice,
   DowntimeEntry,
   FirewallRule,
+  HotspotExpiryMode,
   HotspotProfile,
   HotspotServer,
   HotspotUser,
@@ -41,20 +42,32 @@ import type {
   AuthUser,
   BackupPolicy,
   BulkImportResult,
+  BulkOperation,
   DiffLine,
   DiscoveredDevice,
+  FirewallJournalEntry,
   FirewallTable,
   FleetHealth,
+  FleetResult,
+  GeneratedVoucher,
+  HotspotActiveSession,
   MetricPoint,
   MetricRange,
+  FleetRouterResult,
   NotificationChannels,
   OnboardingIssue,
   PlatformUser,
   ProxyAllocation,
+  RevenueSummary,
   Role,
   RouterFilters,
   RouterResources,
   RouterView,
+  SessionSearchHit,
+  VoucherBatchResult,
+  WizardPreview,
+  WizardSentence,
+  WizardStatus,
 } from './types';
 
 // ---------------------------------------------------------------------------
@@ -101,6 +114,35 @@ export interface HotspotUserProfileInput {
   sharedUsers?: number;
   sessionTimeout?: string;
   idleTimeout?: string;
+  /** Lock the plan to a single client MAC address (e.g. AA:BB:CC:11:22:33). */
+  macLock?: string;
+  expiryMode?: HotspotExpiryMode;
+}
+
+export interface VoucherBatchRequest {
+  mode: 'up' | 'vc';
+  count: number;
+  prefix: string;
+  codeLength: number;
+  profileName: string;
+  excludeConfusing: boolean;
+  expiryMode: 'remove' | 'notify' | 'remove_notify' | 'none';
+  validityFromFirstLogin: boolean;
+  note: string;
+}
+
+export interface WizardPreviewRequest {
+  poolName: string;
+  poolRange: string;
+  dhcpInterface: string;
+  leaseTime: string;
+  wanInterface: string;
+  walledGardenHosts: string;
+  dnsServers: string;
+  allowRemoteRequests: boolean;
+  hotspotInterface: string;
+  hotspotProfile: string;
+  hotspotDnsName: string;
 }
 
 export interface HotspotUserInput {
@@ -109,6 +151,8 @@ export interface HotspotUserInput {
   profileName?: string;
   comment?: string;
   disabled?: boolean;
+  validityFromFirstLogin?: boolean;
+  expiryMode?: HotspotExpiryMode;
 }
 
 export interface FirewallRuleInput {
@@ -158,6 +202,7 @@ export interface RouterInput {
   ftpPort?: number;
   wwwPort?: number;
   isHub?: boolean;
+  tags?: string[];
 }
 
 export interface PlatformUserInput {
@@ -198,8 +243,6 @@ export interface ApiClient {
   rebootRouter(id: string): Promise<ApplyResult>;
   rotateRouterSecret(id: string): Promise<{ rotatedAt: string }>;
   getRouterResources(id: string): Promise<RouterResources>;
-  issueOnboardingToken(siteId: string, identity: string): Promise<OnboardingIssue>;
-  getOnboardingToken(token: string): Promise<ProvisioningToken>;
 
   // hotspot (per router)
   listHotspotServers(routerId: string): Promise<HotspotServer[]>;
@@ -214,6 +257,9 @@ export interface ApiClient {
   createHotspotUser(routerId: string, input: HotspotUserInput): Promise<HotspotUser>;
   updateHotspotUser(routerId: string, id: string, input: Partial<HotspotUserInput>): Promise<HotspotUser>;
   deleteHotspotUser(routerId: string, id: string): Promise<void>;
+  /** Generate a batch of hotspot users/vouchers; returns the cleartext codes once. */
+  generateVoucherBatch(routerId: string, input: VoucherBatchRequest): Promise<VoucherBatchResult>;
+  resetHotspotUserCounters(routerId: string, id: string): Promise<void>;
   listUserProfiles(routerId: string): Promise<HotspotUserProfile[]>;
   createUserProfile(routerId: string, input: HotspotUserProfileInput): Promise<HotspotUserProfile>;
   updateUserProfile(routerId: string, id: string, input: Partial<HotspotUserProfileInput>): Promise<HotspotUserProfile>;
@@ -235,6 +281,9 @@ export interface ApiClient {
   toggleFirewallRule(routerId: string, table: FirewallTable, ruleId: string, disabled: boolean): Promise<FirewallRule>;
   previewFirewallChanges(routerId: string, changes: FirewallChange[]): Promise<DiffLine[]>;
   applyFirewallChanges(routerId: string, changes: FirewallChange[], safeApply: boolean): Promise<ApplyResult>;
+  /** Rollback journal: every applied change-set is recorded; rollback revokes it. */
+  listFirewallJournal(routerId: string): Promise<FirewallJournalEntry[]>;
+  rollbackFirewallJournal(routerId: string, entryId: string): Promise<ApplyResult>;
 
   // queues (per router)
   listSimpleQueues(routerId: string): Promise<QueueItem[]>;
@@ -254,6 +303,27 @@ export interface ApiClient {
   createAlertRule(input: Omit<AlertRule, 'id'>): Promise<AlertRule>;
   updateAlertRule(id: string, input: Partial<AlertRule>): Promise<AlertRule>;
   deleteAlertRule(id: string): Promise<void>;
+  /** Currently-online hotspot sessions on one router. */
+  listHotspotActiveSessions(routerId: string): Promise<HotspotActiveSession[]>;
+  /** Kick one active hotspot session (removes it from /ip/hotspot/active). */
+  kickHotspotSession(routerId: string, sessionId: string): Promise<void>;
+  /** Fleet-wide session lookup: username or IP → which routers it's online on. */
+  searchHotspotSessions(q: string): Promise<SessionSearchHit[]>;
+  /** Today's voucher redemptions + revenue (honest zeros when unset). */
+  getRevenueSummary(): Promise<RevenueSummary>;
+
+  // provisioning
+  issueOnboardingToken(siteId: string, identity: string): Promise<OnboardingIssue>;
+  getOnboardingToken(token: string): Promise<ProvisioningToken>;
+  /** Guided setup wizard: preview planned RouterOS sentences grouped by step. */
+  previewSetupWizard(routerId: string, input: WizardPreviewRequest): Promise<WizardPreview>;
+  /** Confirm the previewed plan; returns the opId to track. */
+  applySetupWizard(routerId: string, opId: string): Promise<{ opId: string }>;
+  /** Poll wizard run progress by opId. */
+  getSetupWizardStatus(routerId: string, opId: string): Promise<WizardStatus>;
+
+  // fleet bulk operations
+  bulkRouterOperation(routerIds: string[], operation: BulkOperation): Promise<FleetResult>;
 
   // backups
   listBackups(routerId?: string): Promise<BackupRecord[]>;
@@ -299,11 +369,11 @@ export class MockApiClient implements ApiClient {
   ];
 
   private routers: RouterView[] = [
-    { id: 'r-001', uuid: 'uuid-cafe-maadi-01', siteId: 'site-maadi', siteName: 'Cairo — Maadi', identityName: 'cafe-maadi-01', boardName: 'RB750Gr3', routerOsVersion: '7.14.2', architecture: 'mmips', tunnelIp: '10.200.0.2', sstpUsername: 'sstp-cafe-maadi-01', apiUsername: 'panel-api', apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 22, telnetPort: 23, ftpPort: 21, wwwPort: 80, status: 'online', lastSeen: nowIso(), flapCount: 0, pollerShard: 1, isHub: false, createdAt: '2026-09-01T10:00:00Z', updatedAt: nowIso() },
-    { id: 'r-002', uuid: 'uuid-rest-zamalek-02', siteId: 'site-zamalek', siteName: 'Cairo — Zamalek', identityName: 'rest-zamalek-02', boardName: 'hAP ac²', routerOsVersion: '6.49.13', architecture: 'arm', tunnelIp: '10.200.0.3', sstpUsername: 'sstp-rest-zamalek-02', apiUsername: 'panel-api', apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 22, telnetPort: 23, ftpPort: 21, wwwPort: 80, status: 'online', lastSeen: nowIso(), flapCount: 1, pollerShard: 2, isHub: false, createdAt: '2026-09-05T10:00:00Z', updatedAt: nowIso() },
-    { id: 'r-003', uuid: 'uuid-hotel-hurghada-01', siteId: 'site-hurghada', siteName: 'Hurghada — Marina', identityName: 'hotel-hurghada-01', boardName: 'RB4011', routerOsVersion: '7.12.1', architecture: 'arm', tunnelIp: '10.200.0.4', sstpUsername: 'sstp-hotel-hurghada-01', apiUsername: 'panel-api', apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 22, telnetPort: 23, ftpPort: 21, wwwPort: 80, status: 'offline', lastSeen: '2026-10-16T05:12:03Z', flapCount: 4, pollerShard: 3, isHub: false, createdAt: '2026-09-12T10:00:00Z', updatedAt: '2026-10-16T05:12:03Z' },
-    { id: 'r-004', uuid: 'uuid-cafe-alex-01', siteId: 'site-alex', siteName: 'Alexandria — Corniche', identityName: 'cafe-alex-01', routerOsVersion: '7.14.2', tunnelIp: '10.200.0.5', sstpUsername: 'sstp-cafe-alex-01', apiUsername: 'panel-api', apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 22, telnetPort: 23, ftpPort: 21, wwwPort: 80, status: 'pending', flapCount: 0, pollerShard: 4, isHub: false, createdAt: '2026-10-16T07:00:00Z', updatedAt: '2026-10-16T07:00:00Z' },
-    { id: 'r-hub', uuid: 'uuid-hub-chr', siteId: 'site-maadi', siteName: 'Hub — Frankfurt', identityName: 'hub-chr', boardName: 'CHR', routerOsVersion: '6.49.17', architecture: 'x86_64', tunnelIp: '10.200.0.1', sstpUsername: 'sstp-hub', apiUsername: 'panel-api', apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 8922, telnetPort: 8923, ftpPort: 8921, wwwPort: 8980, status: 'online', lastSeen: nowIso(), flapCount: 0, pollerShard: 0, isHub: true, createdAt: '2026-09-01T09:00:00Z', updatedAt: nowIso() },
+    { id: 'r-001', uuid: 'uuid-cafe-maadi-01', siteId: 'site-maadi', siteName: 'Cairo — Maadi', identityName: 'cafe-maadi-01', boardName: 'RB750Gr3', routerOsVersion: '7.14.2', architecture: 'mmips', tunnelIp: '10.200.0.2', sstpUsername: 'sstp-cafe-maadi-01', apiUsername: 'panel-api', apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 22, telnetPort: 23, ftpPort: 21, wwwPort: 80, status: 'online', lastSeen: nowIso(), tags: ['cairo', 'maadi', 'cafe'], flapCount: 0, pollerShard: 1, isHub: false, createdAt: '2026-09-01T10:00:00Z', updatedAt: nowIso() },
+    { id: 'r-002', uuid: 'uuid-rest-zamalek-02', siteId: 'site-zamalek', siteName: 'Cairo — Zamalek', identityName: 'rest-zamalek-02', boardName: 'hAP ac²', routerOsVersion: '6.49.13', architecture: 'arm', tunnelIp: '10.200.0.3', sstpUsername: 'sstp-rest-zamalek-02', apiUsername: 'panel-api', apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 22, telnetPort: 23, ftpPort: 21, wwwPort: 80, status: 'online', lastSeen: nowIso(), tags: ['cairo', 'zamalek', 'restaurant'], flapCount: 1, pollerShard: 2, isHub: false, createdAt: '2026-09-05T10:00:00Z', updatedAt: nowIso() },
+    { id: 'r-003', uuid: 'uuid-hotel-hurghada-01', siteId: 'site-hurghada', siteName: 'Hurghada — Marina', identityName: 'hotel-hurghada-01', boardName: 'RB4011', routerOsVersion: '7.12.1', architecture: 'arm', tunnelIp: '10.200.0.4', sstpUsername: 'sstp-hotel-hurghada-01', apiUsername: 'panel-api', apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 22, telnetPort: 23, ftpPort: 21, wwwPort: 80, status: 'offline', lastSeen: '2026-10-16T05:12:03Z', tags: ['hurghada', 'hotel'], flapCount: 4, pollerShard: 3, isHub: false, createdAt: '2026-09-12T10:00:00Z', updatedAt: '2026-10-16T05:12:03Z' },
+    { id: 'r-004', uuid: 'uuid-cafe-alex-01', siteId: 'site-alex', siteName: 'Alexandria — Corniche', identityName: 'cafe-alex-01', routerOsVersion: '7.14.2', tunnelIp: '10.200.0.5', sstpUsername: 'sstp-cafe-alex-01', apiUsername: 'panel-api', apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 22, telnetPort: 23, ftpPort: 21, wwwPort: 80, status: 'pending', tags: ['alexandria', 'cafe'], flapCount: 0, pollerShard: 4, isHub: false, createdAt: '2026-10-16T07:00:00Z', updatedAt: '2026-10-16T07:00:00Z' },
+    { id: 'r-hub', uuid: 'uuid-hub-chr', siteId: 'site-maadi', siteName: 'Hub — Frankfurt', identityName: 'hub-chr', boardName: 'CHR', routerOsVersion: '6.49.17', architecture: 'x86_64', tunnelIp: '10.200.0.1', sstpUsername: 'sstp-hub', apiUsername: 'panel-api', apiPort: 8728, apiSslPort: 8729, winboxPort: 8291, sshPort: 8922, telnetPort: 8923, ftpPort: 8921, wwwPort: 8980, status: 'online', lastSeen: nowIso(), tags: ['hub', 'frankfurt'], flapCount: 0, pollerShard: 0, isHub: true, createdAt: '2026-09-01T09:00:00Z', updatedAt: nowIso() },
   ];
 
   private hotspotServers: Record<string, HotspotServer[]> = {
@@ -324,17 +394,17 @@ export class MockApiClient implements ApiClient {
 
   private hotspotUsers: Record<string, HotspotUser[]> = {
     'r-001': [
-      { id: 'hu-1', routerId: 'r-001', name: 'table-05', profileName: 'hsprof-default', disabled: false, uptimeUsedS: '4364', bytesIn: '412000000', bytesOut: '1204000000', createdAt: '2026-10-16T06:00:00Z' },
-      { id: 'hu-2', routerId: 'r-001', name: 'table-12', profileName: 'hsprof-vip', disabled: false, uptimeUsedS: '1390', bytesIn: '98000000', bytesOut: '310000000', createdAt: '2026-10-16T06:30:00Z' },
-      { id: 'hu-3', routerId: 'r-001', name: 'staff-01', profileName: 'hsprof-default', disabled: true, uptimeUsedS: '0', bytesIn: '0', bytesOut: '0', comment: 'suspended — quota', createdAt: '2026-10-15T09:00:00Z' },
+      { id: 'hu-1', routerId: 'r-001', name: 'table-05', profileName: 'hsprof-default', disabled: false, uptimeUsedS: '4364', bytesIn: '412000000', bytesOut: '1204000000', validityFromFirstLogin: false, expiryMode: 'remove', createdAt: '2026-10-16T06:00:00Z' },
+      { id: 'hu-2', routerId: 'r-001', name: 'table-12', profileName: 'hsprof-vip', disabled: false, uptimeUsedS: '1390', bytesIn: '98000000', bytesOut: '310000000', validityFromFirstLogin: false, expiryMode: 'remove', createdAt: '2026-10-16T06:30:00Z' },
+      { id: 'hu-3', routerId: 'r-001', name: 'staff-01', profileName: 'hsprof-default', disabled: true, uptimeUsedS: '0', bytesIn: '0', bytesOut: '0', comment: 'suspended — quota', validityFromFirstLogin: false, expiryMode: 'remove', createdAt: '2026-10-15T09:00:00Z' },
     ],
   };
 
   private userProfiles: Record<string, HotspotUserProfile[]> = {
     'r-001': [
-      { id: 'hup-1', routerId: 'r-001', name: 'hsprof-default', rateLimit: '10M/10M', sessionTimeout: '04:00:00', idleTimeout: '00:15:00', sharedUsers: 2 },
-      { id: 'hup-2', routerId: 'r-001', name: 'hsprof-vip', rateLimit: '50M/50M', sessionTimeout: '12:00:00', sharedUsers: 5 },
-      { id: 'hup-3', routerId: 'r-001', name: 'staff', rateLimit: '20M/20M', sharedUsers: 3 },
+      { id: 'hup-1', routerId: 'r-001', name: 'hsprof-default', rateLimit: '10M/10M', sessionTimeout: '04:00:00', idleTimeout: '00:15:00', sharedUsers: 2, expiryMode: 'remove' },
+      { id: 'hup-2', routerId: 'r-001', name: 'hsprof-vip', rateLimit: '50M/50M', sessionTimeout: '12:00:00', sharedUsers: 5, expiryMode: 'remove' },
+      { id: 'hup-3', routerId: 'r-001', name: 'staff', rateLimit: '20M/20M', sharedUsers: 3, expiryMode: 'remove' },
     ],
   };
 
@@ -352,21 +422,31 @@ export class MockApiClient implements ApiClient {
   private firewall: Record<string, Record<FirewallTable, FirewallRule[]>> = {
     'r-001': {
       filter: [
-        { id: 'fw-f1', routerId: 'r-001', table: 'filter', order: 0, chain: 'input', action: 'accept', protocol: 'tcp', dstPort: '8728', srcAddress: '10.200.0.0/16', comment: 'panel: allow API from tunnel', disabled: false, managed: true },
-        { id: 'fw-f2', routerId: 'r-001', table: 'filter', order: 1, chain: 'input', action: 'drop', comment: 'panel: drop everything else on input', disabled: false, managed: true },
-        { id: 'fw-f3', routerId: 'r-001', table: 'filter', order: 2, chain: 'forward', action: 'accept', comment: 'established,related', disabled: false, managed: false },
+        { id: 'fw-f1', routerId: 'r-001', table: 'filter', order: 0, chain: 'input', action: 'accept', protocol: 'tcp', dstPort: '8728', srcAddress: '10.200.0.0/16', comment: 'panel: allow API from tunnel', disabled: false, managed: true, revoked: false },
+        { id: 'fw-f2', routerId: 'r-001', table: 'filter', order: 1, chain: 'input', action: 'drop', comment: 'panel: drop everything else on input', disabled: false, managed: true, revoked: false },
+        { id: 'fw-f3', routerId: 'r-001', table: 'filter', order: 2, chain: 'forward', action: 'accept', comment: 'established,related', disabled: false, managed: false, revoked: false },
       ],
       nat: [
-        { id: 'fw-n1', routerId: 'r-001', table: 'nat', order: 0, chain: 'srcnat', action: 'masquerade', outInterface: 'ether1-WAN', comment: 'site WAN masquerade', disabled: false, managed: false },
-        { id: 'fw-n2', routerId: 'r-001', table: 'nat', order: 1, chain: 'dstnat', action: 'dst-nat', protocol: 'tcp', dstPort: '2201', toAddresses: '192.168.88.21', toPorts: '22', comment: 'panel-proxy:dev-cam-01', disabled: false, managed: true },
+        { id: 'fw-n1', routerId: 'r-001', table: 'nat', order: 0, chain: 'srcnat', action: 'masquerade', outInterface: 'ether1-WAN', comment: 'site WAN masquerade', disabled: false, managed: false, revoked: false },
+        { id: 'fw-n2', routerId: 'r-001', table: 'nat', order: 1, chain: 'dstnat', action: 'dst-nat', protocol: 'tcp', dstPort: '2201', toAddresses: '192.168.88.21', toPorts: '22', comment: 'panel-proxy:dev-cam-01', disabled: false, managed: true, revoked: false },
       ],
       mangle: [
-        { id: 'fw-m1', routerId: 'r-001', table: 'mangle', order: 0, chain: 'prerouting', action: 'mark-connection', comment: 'mark hotspot traffic', disabled: true, managed: false },
+        { id: 'fw-m1', routerId: 'r-001', table: 'mangle', order: 0, chain: 'prerouting', action: 'mark-connection', comment: 'mark hotspot traffic', disabled: true, managed: false, revoked: false },
       ],
       'address-list': [
-        { id: 'fw-a1', routerId: 'r-001', table: 'address-list' as FirewallRule['table'], order: 0, chain: 'address-list', action: '', srcAddress: '192.168.88.0/24', comment: 'list=lan-subnet', disabled: false, managed: true },
+        { id: 'fw-a1', routerId: 'r-001', table: 'address-list' as FirewallRule['table'], order: 0, chain: 'address-list', action: '', srcAddress: '192.168.88.0/24', comment: 'list=lan-subnet', disabled: false, managed: true, revoked: false },
       ],
     },
+  };
+
+  private firewallJournal: Record<string, FirewallJournalEntry[]> = {
+    'r-001': [
+      {
+        id: 'fj-seed-1', routerId: 'r-001', createdAt: '2026-10-16T06:58:40Z',
+        op: 'apply', ruleCount: 2, table: 'filter', ruleIds: ['fw-f1', 'fw-f2'],
+        rolledBack: false, actor: 'ops@fleet.local',
+      },
+    ],
   };
 
   private queues: Record<string, { simple: QueueItem[]; tree: QueueItem[] }> = {
@@ -399,6 +479,17 @@ export class MockApiClient implements ApiClient {
     { id: 'al-2', name: 'CPU above 85%', kind: 'cpu_high', threshold: 85, enabled: true, channels: ['telegram'] },
     { id: 'al-3', name: 'Backup failed', kind: 'backup_failed', threshold: 1, enabled: false, channels: ['email'] },
   ];
+
+  private hotspotActive: Record<string, HotspotActiveSession[]> = {
+    'r-001': [
+      { id: 'as-1', routerId: 'r-001', username: 'table-05', ip: '192.168.88.101', mac: 'AA:BB:CC:11:22:33', server: 'hotspot1', uptimeS: 4364, bytesIn: '412000000', bytesOut: '1204000000' },
+      { id: 'as-2', routerId: 'r-001', username: 'table-12', ip: '192.168.88.102', mac: 'AA:BB:CC:44:55:66', server: 'hotspot1', uptimeS: 1390, bytesIn: '98000000', bytesOut: '310000000' },
+      { id: 'as-3', routerId: 'r-001', username: 'vc-a1b2c3', ip: '192.168.88.103', mac: 'AA:BB:CC:77:88:99', server: 'hotspot1', uptimeS: 420, bytesIn: '12000000', bytesOut: '45000000' },
+    ],
+    'r-002': [
+      { id: 'as-4', routerId: 'r-002', username: 'guest-07', ip: '192.168.89.44', mac: 'DD:EE:FF:00:11:22', server: 'hotspot1', uptimeS: 900, bytesIn: '30000000', bytesOut: '120000000' },
+    ],
+  };
 
   private notificationChannels: NotificationChannels = {
     telegram: { enabled: true, configured: false },
@@ -505,6 +596,7 @@ export class MockApiClient implements ApiClient {
     let rows = [...this.routers];
     if (filters?.status && filters.status !== 'all') rows = rows.filter((r) => r.status === filters.status);
     if (filters?.siteId) rows = rows.filter((r) => r.siteId === filters.siteId);
+    if (filters?.tag) rows = rows.filter((r) => (r.tags ?? []).includes(filters.tag!));
     if (filters?.q) {
       const q = filters.q.toLowerCase();
       rows = rows.filter((r) => (r.identityName ?? '').toLowerCase().includes(q) || (r.siteName ?? '').toLowerCase().includes(q) || r.tunnelIp.includes(q));
@@ -534,7 +626,7 @@ export class MockApiClient implements ApiClient {
       telnetPort: input.telnetPort ?? 23, ftpPort: input.ftpPort ?? 21,
       wwwPort: input.wwwPort ?? 80,
       status: 'pending', flapCount: 0, pollerShard: 0,
-      isHub: input.isHub ?? false,
+      isHub: input.isHub ?? false, tags: input.tags ?? [],
       createdAt: nowIso(), updatedAt: nowIso(),
     };
     this.routers.push(r);
@@ -602,6 +694,88 @@ export class MockApiClient implements ApiClient {
     return { token, routerId: uid('r'), expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() };
   }
 
+  // -- setup wizard ------------------------------------------------------------
+  private wizardRuns: Record<string, { routerId: string; done: number; total: number; status: WizardStatus['status']; currentStep: string }> = {};
+
+  async previewSetupWizard(routerId: string, input: WizardPreviewRequest): Promise<WizardPreview> {
+    await this.wait();
+    const opId = `wiz-${Math.random().toString(36).slice(2, 10)}`;
+    const q = (s: string) => (s.includes(' ') || s.includes('=') ? `"${s}"` : s);
+    const sentences: WizardSentence[] = [
+      { step: 'pool', text: `/ip pool add name=${q(input.poolName)} ranges=${input.poolRange}` },
+      { step: 'dhcp', text: `/ip dhcp-server add name=dhcp-${input.dhcpInterface} interface=${input.dhcpInterface} address-pool=${q(input.poolName)} lease-time=${input.leaseTime} disabled=no` },
+      { step: 'dhcp', text: `/ip dhcp-server network add address=${input.poolRange.split('-')[0].split('.').slice(0, 3).join('.')}.0/24 gateway=${input.poolRange.split('-')[0]} dns-server=${input.dnsServers}` },
+      { step: 'nat', text: `/ip firewall nat add chain=srcnat out-interface=${input.wanInterface} action=masquerade comment="panel: wizard NAT"` },
+      ...input.walledGardenHosts.split('\n').map((h) => h.trim()).filter(Boolean).map((h) => ({
+        step: 'walledGarden' as const,
+        text: `/ip hotspot walled-garden add dst-host=${q(h)} comment="panel: wizard"`,
+      })),
+      { step: 'dns', text: `/ip dns set servers=${input.dnsServers} allow-remote-requests=${input.allowRemoteRequests ? 'yes' : 'no'}` },
+      { step: 'hotspot', text: `/ip hotspot profile add name=${q(input.hotspotProfile)} hotspot-address=${input.poolRange.split('-')[0]} dns-name=${input.hotspotDnsName} login-by=http-chap,https` },
+      { step: 'hotspot', text: `/ip hotspot add name=hotspot1 interface=${input.hotspotInterface} address-pool=${q(input.poolName)} profile=${q(input.hotspotProfile)} disabled=no` },
+    ];
+    this.wizardRuns[opId] = { routerId, done: 0, total: sentences.length, status: 'pending', currentStep: 'pool' };
+    // Stash the sentences on the run so apply/status can reference them.
+    (this.wizardRuns[opId] as { sentences?: WizardSentence[] }).sentences = sentences;
+    return { opId, routerId, sentences };
+  }
+  async applySetupWizard(routerId: string, opId: string): Promise<{ opId: string }> {
+    await this.wait();
+    const run = this.wizardRuns[opId];
+    if (!run || run.routerId !== routerId) throw this.notFound('Wizard run');
+    run.status = 'running';
+    run.done = 0;
+    return { opId };
+  }
+  async getSetupWizardStatus(routerId: string, opId: string): Promise<WizardStatus> {
+    await this.wait();
+    const run = this.wizardRuns[opId];
+    if (!run || run.routerId !== routerId) throw this.notFound('Wizard run');
+    if (run.status === 'running') {
+      // Simulate worker progress: each poll advances a couple of steps.
+      run.done = Math.min(run.total, run.done + 2);
+      const steps = ['pool', 'dhcp', 'nat', 'walledGarden', 'dns', 'hotspot'] as const;
+      run.currentStep = steps[Math.min(steps.length - 1, Math.floor((run.done / run.total) * steps.length))];
+      if (run.done >= run.total) run.status = 'done';
+    }
+    return {
+      opId,
+      status: run.status,
+      currentStep: run.currentStep,
+      doneSteps: run.done,
+      totalSteps: run.total,
+      message: run.status === 'done' ? 'Setup wizard completed on the router' : undefined,
+    };
+  }
+
+  // -- fleet bulk --------------------------------------------------------------
+  async bulkRouterOperation(routerIds: string[], operation: BulkOperation): Promise<FleetResult> {
+    const opId = `bulk-${Math.random().toString(36).slice(2, 10)}`;
+    const results: FleetRouterResult[] = [];
+    // One router's failure never blocks the rest — collect per-router results.
+    for (const id of routerIds) {
+      const router = this.routers.find((r) => r.id === id);
+      const routerName = router?.identityName ?? id;
+      try {
+        if (!router) throw new Error('Router not found');
+        if (operation === 'reboot') await this.rebootRouter(id);
+        else if (operation === 'rotate-secret') await this.rotateRouterSecret(id);
+        else await this.triggerBackup(id);
+        results.push({ routerId: id, routerName, ok: true });
+      } catch (e) {
+        results.push({ routerId: id, routerName, ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    await this.wait();
+    return {
+      opId,
+      operation,
+      results,
+      okCount: results.filter((r) => r.ok).length,
+      failCount: results.filter((r) => !r.ok).length,
+    };
+  }
+
   // -- hotspot ---------------------------------------------------------------
   private hs<T>(map: Record<string, T[]>, routerId: string): T[] {
     return (map[routerId] ??= []);
@@ -651,7 +825,8 @@ export class MockApiClient implements ApiClient {
     const u: HotspotUser = {
       id: uid('hu'), routerId,
       uptimeUsedS: '0', bytesIn: '0', bytesOut: '0',
-      disabled: false, createdAt: nowIso(),
+      disabled: false, validityFromFirstLogin: false, expiryMode: 'remove',
+      createdAt: nowIso(),
       ...rest,
     };
     this.hs(this.hotspotUsers, routerId).push(u);
@@ -671,7 +846,7 @@ export class MockApiClient implements ApiClient {
   async listUserProfiles(routerId: string) { await this.wait(); return [...this.hs(this.userProfiles, routerId)]; }
   async createUserProfile(routerId: string, input: HotspotUserProfileInput) {
     await this.wait();
-    const p: HotspotUserProfile = { id: uid('hup'), routerId, ...input };
+    const p: HotspotUserProfile = { id: uid('hup'), routerId, expiryMode: 'remove', ...input };
     this.hs(this.userProfiles, routerId).push(p);
     return p;
   }
@@ -722,11 +897,61 @@ export class MockApiClient implements ApiClient {
       this.hs(this.hotspotUsers, routerId).push({
         id: uid('hu'), routerId, name, profileName: profile,
         disabled: false, uptimeUsedS: '0', bytesIn: '0', bytesOut: '0',
+        validityFromFirstLogin: false, expiryMode: 'remove',
         createdAt: nowIso(),
       });
       created += 1;
     }
     return { created, failed: errors.length, errors };
+  }
+
+  /** Voucher/user batch generation. Returns cleartext codes ONCE (never stored). */
+  async generateVoucherBatch(routerId: string, input: VoucherBatchRequest): Promise<VoucherBatchResult> {
+    await this.wait();
+    const full = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+    const safe = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'.replace(/[0O1lI]/g, '');
+    const alphabet = input.excludeConfusing ? safe : full;
+    const rand = (n: number) => Array.from({ length: n }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('');
+    const batchId = Math.random().toString(36).slice(2, 8);
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const note = (input.note ?? '').trim().replace(/\s+/g, '-').slice(0, 24);
+    const batchComment = `vc-${batchId}-${date}${note ? `-${note}` : ''}`;
+    const users: GeneratedVoucher[] = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < input.count; i++) {
+      let name: string;
+      let password: string;
+      do {
+        const code = rand(input.codeLength);
+        if (input.mode === 'vc') {
+          name = `${input.prefix}${code}`;
+          password = name; // voucher: username = password
+        } else {
+          name = `${input.prefix}${code}`;
+          password = rand(Math.max(6, input.codeLength));
+        }
+      } while (seen.has(name));
+      seen.add(name);
+      users.push({ name, password });
+      // The cleartext password is returned once; the store keeps the user row only.
+      this.hs(this.hotspotUsers, routerId).push({
+        id: uid('hu'), routerId, name, profileName: input.profileName,
+        disabled: false, uptimeUsedS: '0', bytesIn: '0', bytesOut: '0',
+        validityFromFirstLogin: input.validityFromFirstLogin,
+        expiryMode: (input.expiryMode === 'remove_notify' ? 'remove+notify' : input.expiryMode) as HotspotExpiryMode,
+        comment: batchComment, createdAt: nowIso(),
+      });
+    }
+    return { batchId, batchComment, users, createdAt: nowIso() };
+  }
+
+  async resetHotspotUserCounters(routerId: string, id: string): Promise<void> {
+    await this.wait();
+    const u = this.hs(this.hotspotUsers, routerId).find((x) => x.id === id);
+    if (!u) throw this.notFound('Hotspot user');
+    u.uptimeUsedS = '0';
+    u.bytesIn = '0';
+    u.bytesOut = '0';
   }
 
   // -- firewall ---------------------------------------------------------------
@@ -741,7 +966,7 @@ export class MockApiClient implements ApiClient {
     const { placeBeforeId, ...rest } = input;
     const rule: FirewallRule = {
       id: uid('fw'), routerId, table: table as FirewallRule['table'],
-      order: rules.length, disabled: false, managed: true,
+      order: rules.length, disabled: false, revoked: false, managed: true,
       ...rest,
     };
     if (placeBeforeId) {
@@ -793,6 +1018,19 @@ export class MockApiClient implements ApiClient {
       else if (c.kind === 'move' && c.ruleId && c.direction) await this.moveFirewallRule(routerId, c.table, c.ruleId, c.direction);
       else if (c.kind === 'toggle' && c.ruleId && c.disabled !== undefined) await this.toggleFirewallRule(routerId, c.table, c.ruleId, c.disabled);
     }
+    // Record the change-set in the rollback journal.
+    const tables = [...new Set(changes.map((c) => c.table))];
+    (this.firewallJournal[routerId] ??= []).unshift({
+      id: uid('fj'),
+      routerId,
+      createdAt: nowIso(),
+      op: safeApply ? 'safe-apply' : 'apply',
+      ruleCount: changes.length,
+      table: tables.length === 1 ? tables[0] : undefined,
+      ruleIds: changes.map((c) => c.ruleId).filter((x): x is string => !!x && !x.startsWith('staged-')),
+      rolledBack: false,
+      actor: 'panel',
+    });
     return {
       applied: true,
       rolledBack: false,
@@ -800,6 +1038,24 @@ export class MockApiClient implements ApiClient {
         ? 'Applied with safe-apply: worker will verify heartbeat for 60s and auto-rollback on loss'
         : 'Applied without safe-apply',
     };
+  }
+  async listFirewallJournal(routerId: string): Promise<FirewallJournalEntry[]> {
+    await this.wait();
+    return [...(this.firewallJournal[routerId] ?? [])];
+  }
+  async rollbackFirewallJournal(routerId: string, entryId: string): Promise<ApplyResult> {
+    await this.wait();
+    const entry = (this.firewallJournal[routerId] ?? []).find((e) => e.id === entryId);
+    if (!entry) throw this.notFound('Journal entry');
+    if (entry.rolledBack) throw new Error('Entry already rolled back');
+    entry.rolledBack = true;
+    // Revoked rules stay listed (distinct badge in UI) — never silently deleted.
+    for (const table of ['filter', 'nat', 'mangle', 'address-list'] as FirewallTable[]) {
+      for (const rule of this.fw(routerId, table)) {
+        if (entry.ruleIds.includes(rule.id)) rule.revoked = true;
+      }
+    }
+    return { applied: true, rolledBack: true, message: `Rolled back journal entry (${entry.ruleCount} rules revoked)` };
   }
 
   // -- queues ------------------------------------------------------------------
@@ -893,8 +1149,7 @@ export class MockApiClient implements ApiClient {
       recentDowntime: [...this.downtime].slice(0, 5),
     };
   }
-  async listAlertRules() { await this.wait(); return [...this.alertRules]; }
-  async createAlertRule(input: Omit<AlertRule, 'id'>) {
+  async listAlertRules() { await this.wait(); return [...this.alertRules]; }  async createAlertRule(input: Omit<AlertRule, 'id'>) {
     await this.wait();
     const r: AlertRule = { ...input, id: uid('al') };
     this.alertRules.push(r);
@@ -910,6 +1165,36 @@ export class MockApiClient implements ApiClient {
   async deleteAlertRule(id: string) {
     await this.wait();
     this.alertRules = this.alertRules.filter((x) => x.id !== id);
+  }
+  async listHotspotActiveSessions(routerId: string): Promise<HotspotActiveSession[]> {
+    await this.wait();
+    return [...(this.hotspotActive[routerId] ?? [])];
+  }
+  async kickHotspotSession(routerId: string, sessionId: string): Promise<void> {
+    await this.wait();
+    const before = (this.hotspotActive[routerId] ?? []).length;
+    this.hotspotActive[routerId] = (this.hotspotActive[routerId] ?? []).filter((s) => s.id !== sessionId);
+    if (this.hotspotActive[routerId].length === before) throw this.notFound('Hotspot session');
+  }
+  async searchHotspotSessions(q: string): Promise<SessionSearchHit[]> {
+    await this.wait();
+    const needle = q.trim().toLowerCase();
+    if (!needle) return [];
+    const hits: SessionSearchHit[] = [];
+    for (const router of this.routers) {
+      const sessions = (this.hotspotActive[router.id] ?? []).filter(
+        (s) => s.username.toLowerCase().includes(needle) || s.ip.toLowerCase().includes(needle),
+      );
+      if (sessions.length > 0) {
+        hits.push({ routerId: router.id, routerName: router.identityName ?? router.id, sessions });
+      }
+    }
+    return hits;
+  }
+  async getRevenueSummary(): Promise<RevenueSummary> {
+    await this.wait();
+    // MOCK: no billing module wired in Phase 1 — honest zeros.
+    return { date: new Date().toISOString().slice(0, 10), vouchers: 0, revenue: null, currency: 'EGP' };
   }
 
   // -- backups -------------------------------------------------------------------
@@ -1117,6 +1402,7 @@ export class HttpApiClient implements ApiClient {
     if (filters?.q) q.set('q', filters.q);
     if (filters?.status && filters.status !== 'all') q.set('status', filters.status);
     if (filters?.siteId) q.set('siteId', filters.siteId);
+    if (filters?.tag) q.set('tag', filters.tag);
     const s = q.toString();
     return this.get(`/routers${s ? `?${s}` : ''}`);
   }
@@ -1131,6 +1417,18 @@ export class HttpApiClient implements ApiClient {
     return this.post('/provisioning/tokens', { siteId, identity });
   }
   getOnboardingToken(token: string): Promise<ProvisioningToken> { return this.get(`/provisioning/tokens/${token}`); }
+  previewSetupWizard(r: string, input: WizardPreviewRequest): Promise<WizardPreview> {
+    return this.post(`/routers/${r}/provisioning/wizard/preview`, input);
+  }
+  applySetupWizard(r: string, opId: string): Promise<{ opId: string }> {
+    return this.post(`/routers/${r}/provisioning/wizard/apply`, { opId });
+  }
+  getSetupWizardStatus(r: string, opId: string): Promise<WizardStatus> {
+    return this.get(`/routers/${r}/provisioning/wizard/status?opId=${encodeURIComponent(opId)}`);
+  }
+  bulkRouterOperation(routerIds: string[], operation: BulkOperation): Promise<FleetResult> {
+    return this.post('/routers/bulk', { routerIds, operation });
+  }
 
   // -- hotspot
   listHotspotServers(r: string): Promise<HotspotServer[]> { return this.get(`/routers/${r}/hotspot/servers`); }
@@ -1153,9 +1451,9 @@ export class HttpApiClient implements ApiClient {
     return this.patch(`/routers/${r}/hotspot/users/${id}`, input);
   }
   deleteHotspotUser(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/hotspot/users/${id}`); }
-  listUserProfiles(r: string): Promise<HotspotProfile[]> { return this.get(`/routers/${r}/hotspot/user-profiles`); }
-  createUserProfile(r: string, input: HotspotProfileInput): Promise<HotspotProfile> { return this.post(`/routers/${r}/hotspot/user-profiles`, input); }
-  updateUserProfile(r: string, id: string, input: Partial<HotspotProfileInput>): Promise<HotspotProfile> {
+  listUserProfiles(r: string): Promise<HotspotUserProfile[]> { return this.get(`/routers/${r}/hotspot/user-profiles`); }
+  createUserProfile(r: string, input: HotspotUserProfileInput): Promise<HotspotUserProfile> { return this.post(`/routers/${r}/hotspot/user-profiles`, input); }
+  updateUserProfile(r: string, id: string, input: Partial<HotspotUserProfileInput>): Promise<HotspotUserProfile> {
     return this.patch(`/routers/${r}/hotspot/user-profiles/${id}`, input);
   }
   deleteUserProfile(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/hotspot/user-profiles/${id}`); }
@@ -1171,6 +1469,12 @@ export class HttpApiClient implements ApiClient {
   deleteWalledGardenIp(r: string, id: string): Promise<void> { return this.del(`/routers/${r}/hotspot/walled-garden-ip/${id}`); }
   bulkImportHotspotUsers(r: string, csv: string, profile: string): Promise<BulkImportResult> {
     return this.post(`/routers/${r}/hotspot/users/import`, { csv, profile });
+  }
+  generateVoucherBatch(r: string, input: VoucherBatchRequest): Promise<VoucherBatchResult> {
+    return this.post(`/routers/${r}/hotspot/users/batch`, input);
+  }
+  resetHotspotUserCounters(r: string, id: string): Promise<void> {
+    return this.post(`/routers/${r}/hotspot/users/${id}/reset-counters`);
   }
 
   // -- firewall
@@ -1195,6 +1499,12 @@ export class HttpApiClient implements ApiClient {
   }
   applyFirewallChanges(r: string, changes: FirewallChange[], safeApply: boolean): Promise<ApplyResult> {
     return this.post(`/routers/${r}/firewall/apply`, { changes, safeApply });
+  }
+  listFirewallJournal(r: string): Promise<FirewallJournalEntry[]> {
+    return this.get(`/routers/${r}/firewall/journal`);
+  }
+  rollbackFirewallJournal(r: string, entryId: string): Promise<ApplyResult> {
+    return this.post(`/routers/${r}/firewall/journal/${entryId}/rollback`);
   }
 
   // -- queues
@@ -1223,6 +1533,16 @@ export class HttpApiClient implements ApiClient {
   createAlertRule(input: Omit<AlertRule, 'id'>): Promise<AlertRule> { return this.post('/monitoring/alert-rules', input); }
   updateAlertRule(id: string, input: Partial<AlertRule>): Promise<AlertRule> { return this.patch(`/monitoring/alert-rules/${id}`, input); }
   deleteAlertRule(id: string): Promise<void> { return this.del(`/monitoring/alert-rules/${id}`); }
+  listHotspotActiveSessions(r: string): Promise<HotspotActiveSession[]> {
+    return this.get(`/routers/${r}/hotspot/active`);
+  }
+  kickHotspotSession(r: string, sessionId: string): Promise<void> {
+    return this.del(`/routers/${r}/hotspot/active/${sessionId}`);
+  }
+  searchHotspotSessions(q: string): Promise<SessionSearchHit[]> {
+    return this.get(`/monitoring/hotspot-sessions/search?q=${encodeURIComponent(q)}`);
+  }
+  getRevenueSummary(): Promise<RevenueSummary> { return this.get('/monitoring/revenue?period=today'); }
 
   // -- backups
   listBackups(routerId?: string): Promise<BackupRecord[]> {
