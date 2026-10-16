@@ -1,0 +1,42 @@
+# =============================================================================
+# sstp-client-template.rsc — site router as SSTP client (spoke side)
+# Standalone template. In production this logic is inlined into onboard.rsc
+# with the variables baked in by the platform per router.
+#
+# Syntax verified against the official MikroTik SSTP docs (manual.mikrotik.com,
+# 2026-10-16): /interface sstp-client add name= connect-to= port= user=
+# password= profile= authentication= verify-server-certificate=
+# verify-server-address-from-certificate= pfs= tls-version= keepalive-timeout=
+# dial-on-demand= add-default-route= disabled= comment=
+# NOTE: RouterOS models the SSTP server address and TCP port as SEPARATE
+# parameters — do NOT embed the port in connect-to (it is rejected with
+# "bad address or dns name").
+# =============================================================================
+
+# ------------------------- CHANGE: operator variables -------------------------
+:local HUB_HOST "CHANGEME"    # CHANGE: SSTP_HUB_HOST (DNS name or IP of the hub CHR)
+:local SSTP_USER "CHANGEME"   # CHANGE: per-router PPP username (platform-issued)
+:local SSTP_PASS "CHANGEME"   # CHANGE: per-router PPP password (platform-issued, never logged)
+:local UUID "CHANGEME"        # CHANGE: platform router UUID (stamped in the comment)
+:local IFNAME "sstp-to-hub"   # interface name (keep in sync with watchdog.rsc)
+# -------------------------------------------------------------------------------
+
+# Idempotent: remove any previous platform client first
+:if ([:len [/interface sstp-client find name=$IFNAME]] > 0) do={
+    /interface sstp-client remove [find name=$IFNAME]
+    :log info "platform: removed previous SSTP client"
+}
+
+# Security trade-off (documented): the hub uses a self-signed CA, so the spoke
+# does not verify the server certificate (verify-server-certificate=no). The
+# tunnel is still TLS-encrypted and the PPP layer authenticates with the
+# per-router mschap2 username/password. If the hub ever gets a publicly-trusted
+# certificate, flip verify-server-certificate=yes.
+/interface sstp-client add name=$IFNAME connect-to=$HUB_HOST port=443 \
+    user=$SSTP_USER password=$SSTP_PASS profile=default-encryption \
+    authentication=mschap2 verify-server-certificate=no \
+    pfs=yes tls-version=only-1.2 keepalive-timeout=60 \
+    dial-on-demand=no add-default-route=no disabled=no \
+    comment=("platform-uuid=" . $UUID)
+
+:log info "platform: SSTP client installed, dialing hub"
