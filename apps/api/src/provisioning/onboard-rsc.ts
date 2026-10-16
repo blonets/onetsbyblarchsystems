@@ -115,7 +115,7 @@ export function buildOnboardScript(input: OnboardScriptInput): string {
     ``,
     `# 6) Callback to the platform (HTTPS; token in path is the auth, single-use)`,
     `:local board [/system resource get board-name];`,
-    `:local payload ("{\\"uuid\\":\\"${uuid}\\",\\"version\\":\\"" . $ver . "\\",\\"board\\":\\"" . $board . \\"\\"}");`,
+    `:local payload ("{\\"uuid\\":\\"${uuid}\\",\\"version\\":\\"" . $ver . "\\",\\"board\\":\\"" . $board . "\\"}");`,
     `:delay 3s;`,
     `/tool fetch mode=https url="https://${panelHost}${callbackPath}" http-method=post http-data=$payload dst-path=panel-callback.txt check-certificate=no;`,
     `:log info "panel-onboard: callback sent";`,
