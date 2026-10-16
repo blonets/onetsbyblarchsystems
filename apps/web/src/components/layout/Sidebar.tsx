@@ -16,6 +16,7 @@ const items: Array<{ key: string; href: string; roles?: Role[] }> = [
   { key: 'monitoring', href: '/monitoring' },
   { key: 'backups', href: '/backups' },
   { key: 'devices', href: '/devices' },
+  { key: 'provisioning', href: '/provisioning', roles: ['admin', 'operator'] },
   { key: 'admin', href: '/admin', roles: ['admin'] },
 ];
 
@@ -29,6 +30,7 @@ const icons: Record<string, string> = {
   monitoring: '∿',
   backups: '⧉',
   devices: '▣',
+  provisioning: '✦',
   admin: '⚙',
 };
 

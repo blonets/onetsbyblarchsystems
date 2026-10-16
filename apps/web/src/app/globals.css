@@ -24,3 +24,23 @@ body {
   background: var(--color-slate-700);
   border-radius: 8px;
 }
+
+/* Voucher printing: only .print-area is visible on paper. The sheet is
+   `hidden print:block` on screen so it never disturbs the dashboard. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    inset: 0;
+    display: block !important;
+  }
+  .voucher-card {
+    break-inside: avoid;
+  }
+}
