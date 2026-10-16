@@ -9,7 +9,7 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.js
 COPY packages ./packages
 COPY apps/worker ./apps/worker
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @mtk/worker build
+RUN pnpm --filter @mtk/worker... build
 RUN pnpm --filter @mtk/worker --prod deploy /prod/worker
 
 FROM node:24-slim AS runner

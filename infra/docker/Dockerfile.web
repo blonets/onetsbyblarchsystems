@@ -9,7 +9,7 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.js
 COPY packages ./packages
 COPY apps/web ./apps/web
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @mtk/web build
+RUN pnpm --filter @mtk/web... build
 
 FROM node:24-slim AS runner
 ENV NODE_ENV=production

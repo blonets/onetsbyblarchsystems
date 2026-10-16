@@ -12,7 +12,7 @@ RUN pnpm install --frozen-lockfile
 # Prisma engines download here (build host has network; the sandbox/CI does not).
 # The API refuses to boot without a generated client (see src/db/prisma.service.ts).
 RUN pnpm --filter @mtk/api exec prisma generate
-RUN pnpm --filter @mtk/api build
+RUN pnpm --filter @mtk/api... build
 RUN pnpm --filter @mtk/api --prod deploy /prod/api
 
 FROM node:24-slim AS runner
