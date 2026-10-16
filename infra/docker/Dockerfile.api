@@ -2,6 +2,11 @@
 # @mtk/api — NestJS backend
 FROM node:24-slim AS base
 RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+# openssl: Prisma engine detection needs it (without it Prisma defaults to
+# openssl-1.1.x engines that don't exist on Debian bookworm).
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssl \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 FROM base AS builder
@@ -22,10 +27,15 @@ COPY --from=builder /prod/api ./
 # Prisma CLI (pinned to the version in apps/api/package.json) + schema/migrations,
 # so the entrypoint can run `prisma migrate deploy` at container start.
 COPY --from=builder /app/apps/api/prisma ./prisma
-RUN npm install --no-save --no-audit --no-fund prisma@6.16.0
-# curl is needed for the HEALTHCHECK below.
+# Prisma CLI installed in an ISOLATED dir: npm must never read the app's
+# package.json (it uses the pnpm-only `workspace:` protocol and npm aborts).
+RUN mkdir -p /opt/prisma-cli \
+  && cd /opt/prisma-cli \
+  && npm init -y >/dev/null 2>&1 \
+  && npm install --no-save --no-audit --no-fund prisma@6.16.0
+# curl for the HEALTHCHECK; openssl for the Prisma engines at runtime.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends curl \
+  && apt-get install -y --no-install-recommends curl openssl \
   && rm -rf /var/lib/apt/lists/*
 COPY infra/docker/api-entrypoint.sh /usr/local/bin/api-entrypoint.sh
 RUN chmod +x /usr/local/bin/api-entrypoint.sh
