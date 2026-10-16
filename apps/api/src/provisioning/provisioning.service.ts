@@ -23,7 +23,7 @@ import {
   generateRouterCredentials,
   issueOnboardingToken,
 } from './credentials.js';
-import { buildOnboardScript } from './onboard-rsc.js';
+import { buildOnboardScript, buildSyncScript } from './onboard-rsc.js';
 
 export interface ProvisioningConfig {
   /**
@@ -252,8 +252,9 @@ export class ProvisioningService {
     });
 
     const fetchCommand =
-      `/tool fetch mode=https url="https://${this.config.panelHost}/api/v1/onboard/${issued.token}/onboard.rsc" ` +
-      `dst-path=onboard.rsc check-certificate=no; :delay 2s; /import onboard.rsc`;
+      `{ :local v [/system resource get version]; :local m [:pick $v 0 1]; ` +
+      `/tool fetch mode=https url=("https://${this.config.panelHost}/api/v1/onboard/${issued.token}/onboard.rsc?v=" . $m) ` +
+      `dst-path=onboard.rsc check-certificate=no; :delay 2s; /import onboard.rsc; }`;
     return {
       token: issued.token,
       expiresAt: issued.expiresAt,
@@ -302,7 +303,7 @@ export class ProvisioningService {
   // ------------------------------------------------------- onboard flow ---
 
   /** Render the single-use `onboard.rsc` for a token (public, token is the auth). */
-  async getOnboardScript(token: string): Promise<string> {
+  async getOnboardScript(token: string, rosVersion?: string): Promise<string> {
     const row = await this.requireLiveToken(token);
     const sstpPassword = await this.vault.retrieve(row.sstpPasswordRef);
     const apiPassword = await this.vault.retrieve(row.apiPasswordRef);
@@ -324,6 +325,22 @@ export class ProvisioningService {
       panelHost: this.config.panelHost,
       token: row.token,
       callbackPath: `/api/v1/onboard/${row.token}/callback`,
+      rosVersion,
+    });
+  }
+
+  /** Render the periodic sync script for an existing router by UUID. */
+  async getSyncScript(uuid: string, rosVersion?: string): Promise<string> {
+    const router = await this.db.routers.findFirst({ uuid });
+    if (!router) {
+      return `# router not found (uuid=${uuid})\n`;
+    }
+    await this.db.routers.update({ id: router.id }, { lastSeen: new Date(), status: 'online' });
+    return buildSyncScript({
+      uuid: router.uuid,
+      panelHost: this.config.panelHost,
+      hubHost: this.config.hubHost,
+      rosVersion,
     });
   }
 

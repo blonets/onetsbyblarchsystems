@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Header, HttpCode, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Header, HttpCode, Param, Post, Query } from '@nestjs/common';
 import { IsOptional, IsString } from 'class-validator';
 import type { OnboardCallback } from '@mtk/types';
 import { Public } from '../auth/decorators/public.decorator.js';
@@ -32,8 +32,21 @@ export class OnboardController {
   @Public()
   @Get(':token/onboard.rsc')
   @Header('Content-Type', 'text/plain; charset=utf-8')
-  getScript(@Param('token') token: string): Promise<string> {
-    return this.provisioning.getOnboardScript(token);
+  getScript(
+    @Param('token') token: string,
+    @Query('v') version?: string,
+  ): Promise<string> {
+    return this.provisioning.getOnboardScript(token, version);
+  }
+
+  @Public()
+  @Get(':uuid/sync.rsc')
+  @Header('Content-Type', 'text/plain; charset=utf-8')
+  getSyncScript(
+    @Param('uuid') uuid: string,
+    @Query('v') version?: string,
+  ): Promise<string> {
+    return this.provisioning.getSyncScript(uuid, version);
   }
 
   @Public()

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
 import { Link } from '@/i18n/navigation';
 import { Button } from '@/components/ui/button';
@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Field, Input, Select } from '@/components/ui/form';
 import { PageHeader } from '@/components/ui/page';
 import { LoadingState } from '@/components/ui/states';
-import { useIssueOnboardingToken, useSites } from '@/lib/queries';
+import { useIssueOnboardingToken, useOnboardingToken, useSites } from '@/lib/queries';
 import { useSocketRoom } from '@/lib/socket';
 import { formatDateTime } from '@/lib/format';
 import type { OnboardingIssue } from '@/lib/types';
@@ -27,6 +27,14 @@ export default function OnboardRouterPage() {
   const [issue, setIssue] = useState<OnboardingIssue | null>(null);
   const [copied, setCopied] = useState(false);
   const [connected, setConnected] = useState(false);
+
+  // Poll token state so when the router sends the callback, success flips automatically
+  const tokenQ = useOnboardingToken(issue?.token ?? null);
+  useEffect(() => {
+    if (tokenQ.data?.usedAt) {
+      setConnected(true);
+    }
+  }, [tokenQ.data?.usedAt]);
 
   // Listen for the new router coming online (mock: any router:status online
   // flips the waiting state — production: token-bound room).

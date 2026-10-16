@@ -1422,6 +1422,13 @@ export class HttpApiClient implements ApiClient {
           (r.tunnelIp ?? '').includes(needle),
       );
     }
+    const sites = await this.listSites().catch(() => []);
+    const siteMap = new Map(sites.map((s) => [s.id, s.name]));
+    rows = rows.map((r) => ({
+      ...r,
+      siteName: r.siteName ?? (r.siteId ? siteMap.get(r.siteId) : undefined),
+      isHub: Boolean((r as any).isHub || r.tunnelIp === '10.200.0.1' || r.tags?.includes('hub')),
+    }));
     return rows;
   }
   getRouter(id: string): Promise<RouterView> { return this.get(`/routers/${id}`); }

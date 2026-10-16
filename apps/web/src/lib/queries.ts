@@ -173,6 +173,14 @@ export function useIssueOnboardingToken() {
       api.issueOnboardingToken(siteId, identity),
   });
 }
+export function useOnboardingToken(token: string | null) {
+  return useQuery({
+    queryKey: ['onboarding-token', token],
+    queryFn: () => (token ? api.getOnboardingToken(token) : null),
+    enabled: Boolean(token),
+    refetchInterval: (query) => (query.state.data?.usedAt ? false : 2000),
+  });
+}
 export function usePreviewSetupWizard(routerId: string) {
   return useMutation({
     mutationFn: (input: import('./api-client').WizardPreviewRequest) => api.previewSetupWizard(routerId, input),
