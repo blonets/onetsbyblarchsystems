@@ -1,12 +1,13 @@
-import { Body, Controller, Get, Header, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Header, HttpCode, Param, Post, Query, Req } from '@nestjs/common';
 import { IsOptional, IsString } from 'class-validator';
 import type { OnboardCallback } from '@mtk/types';
 import { Public } from '../auth/decorators/public.decorator.js';
 import { ProvisioningService } from './provisioning.service.js';
 
-class CallbackDto implements OnboardCallback {
+class CallbackDto implements Partial<OnboardCallback> {
+  @IsOptional()
   @IsString()
-  uuid!: string;
+  uuid?: string;
 
   @IsOptional()
   @IsString()
@@ -55,7 +56,41 @@ export class OnboardController {
   callback(
     @Param('token') token: string,
     @Body() dto: CallbackDto,
+    @Query('uuid') qUuid?: string,
+    @Query('version') qVersion?: string,
+    @Query('board') qBoard?: string,
+    @Req() req?: any,
   ): Promise<{ routerId: string }> {
-    return this.provisioning.handleCallback(token, dto);
+    let payload: any = dto || {};
+    if (typeof payload === 'string') {
+      try {
+        payload = JSON.parse(payload);
+      } catch {
+        payload = {};
+      }
+    }
+    const finalDto: OnboardCallback = {
+      uuid: payload.uuid || qUuid || req?.query?.uuid || 'uuid-router',
+      version: payload.version || qVersion || req?.query?.version,
+      board: payload.board || qBoard || req?.query?.board,
+      serial: payload.serial || req?.query?.serial,
+    };
+    return this.provisioning.handleCallback(token, finalDto);
+  }
+
+  @Public()
+  @Get(':token/callback')
+  @HttpCode(200)
+  callbackGet(
+    @Param('token') token: string,
+    @Query('uuid') uuid?: string,
+    @Query('version') version?: string,
+    @Query('board') board?: string,
+  ): Promise<{ routerId: string }> {
+    return this.provisioning.handleCallback(token, {
+      uuid: uuid || 'uuid-router',
+      version,
+      board,
+    });
   }
 }
