@@ -3,6 +3,7 @@ import { IsOptional, IsString } from 'class-validator';
 import { Roles } from '../auth/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import type { CurrentUserType } from '../common/types.js';
+import { ProvisionDirectDto } from './dto/provision-router.dto.js';
 import { ProvisioningService } from './provisioning.service.js';
 
 class IssueTokenDto {
@@ -15,6 +16,26 @@ class IssueTokenDto {
 @Roles('technician')
 export class ProvisioningController {
   constructor(private readonly provisioning: ProvisioningService) {}
+
+  /**
+   * Direct IP / manual onboarding of an accessible router.
+   */
+  @Roles('operator')
+  @Post('direct')
+  @HttpCode(201)
+  provisionDirect(@Body() dto: ProvisionDirectDto, @CurrentUser() actor: CurrentUserType) {
+    return this.provisioning.provisionDirect(dto, actor);
+  }
+
+  /**
+   * Reconcile Hub secrets: cleans up orphaned `sstp-*` secrets that are no longer
+   * referenced in the database or active onboarding tokens.
+   */
+  @Roles('admin')
+  @Post('reconcile-hub')
+  reconcileHub() {
+    return this.provisioning.reconcileHubSecrets();
+  }
 
   /**
    * Issue an onboarding token: mints SSTP credentials, allocates the tunnel

@@ -26,3 +26,4 @@ Thumbs.db
 
 # turbo
 .turbo
+*.tsbuildinfo

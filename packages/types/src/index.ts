@@ -535,6 +535,7 @@ export interface AuditEvent {
 export type BusEventName =
   | 'router.online'
   | 'router.offline'
+  | 'router.deleted'
   | 'hotspot.user.login'
   | 'hotspot.user.logout'
   | 'quota.exceeded'
@@ -545,6 +546,7 @@ export type BusEventName =
 export interface BusEventPayload {
   'router.online': { routerId: string; uuid: string; tunnelIp: string; at: string };
   'router.offline': { routerId: string; uuid: string; at: string; cause?: string };
+  'router.deleted': { routerId: string; uuid?: string; tunnelIp?: string; at: string };
   'hotspot.user.login': { routerId: string; username: string; at: string };
   'hotspot.user.logout': { routerId: string; username: string; at: string };
   'quota.exceeded': { routerId: string; username: string; quotaBytes?: string; at: string };

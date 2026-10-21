@@ -14,13 +14,22 @@ class RouterQuery extends PaginationQuery {
   siteId?: string;
 
   @IsOptional()
-  @IsIn(['pending', 'online', 'offline', 'suspect', 'decommissioned'])
-  status?: RouterStatus;
+  @IsIn(['pending', 'online', 'offline', 'suspect', 'decommissioned', 'all'])
+  status?: RouterStatus | 'all';
 
   /** Tag filter — routers carrying this label (see Router.tags). */
   @IsOptional()
   @IsString()
   tag?: string;
+
+  /** General search query (identityName, tunnelIp, version, boardName) */
+  @IsOptional()
+  @IsString()
+  q?: string;
+
+  /** Whether to include decommissioned routers in results */
+  @IsOptional()
+  includeDecommissioned?: string | boolean;
 }
 
 @Controller('routers')
@@ -30,7 +39,19 @@ export class RoutersController {
 
   @Get()
   findAll(@Query() q: RouterQuery) {
-    return this.routers.findAll({ page: q.page, pageSize: q.pageSize, siteId: q.siteId, status: q.status, tag: q.tag });
+    const incDecom =
+      q.includeDecommissioned === true ||
+      q.includeDecommissioned === 'true' ||
+      q.includeDecommissioned === '1';
+    return this.routers.findAll({
+      page: q.page,
+      pageSize: q.pageSize,
+      siteId: q.siteId,
+      status: q.status,
+      tag: q.tag,
+      includeDecommissioned: incDecom,
+      q: q.q,
+    });
   }
 
   @Get(':id')
@@ -41,6 +62,18 @@ export class RoutersController {
   @Get(':id/status')
   getStatus(@Param('id') id: string) {
     return this.routers.getStatus(id);
+  }
+
+  @Roles('technician')
+  @Post(':id/test-connection')
+  testConnection(@Param('id') id: string) {
+    return this.routers.testConnection(id);
+  }
+
+  @Roles('operator')
+  @Post(':id/sync')
+  sync(@Param('id') id: string, @CurrentUser() actor: CurrentUserType) {
+    return this.routers.sync(id, actor);
   }
 
   @Roles('operator')
@@ -57,12 +90,30 @@ export class RoutersController {
   }
 
   /**
-   * Decommission (soft): marks the router decommissioned and enqueues
-   * hub-secret removal. The row is kept for history.
+   * Delete router:
+   * - permanent=true: Completely purges router from Hub secret, Vault, and DB.
+   * - default: Soft decommission.
    */
   @Roles('admin')
   @Delete(':id')
-  decommission(@Param('id') id: string, @CurrentUser() actor: CurrentUserType) {
+  delete(
+    @Param('id') id: string,
+    @Query('permanent') permanent: string,
+    @CurrentUser() actor: CurrentUserType,
+  ) {
+    if (permanent === 'true' || permanent === '1') {
+      return this.routers.deletePermanently(id, actor);
+    }
     return this.routers.decommission(id, actor);
+  }
+
+  /**
+   * Explicit permanent delete:
+   * Completely deletes the router, hub secret, vault entry, and DB row.
+   */
+  @Roles('admin')
+  @Delete(':id/permanent')
+  deletePermanent(@Param('id') id: string, @CurrentUser() actor: CurrentUserType) {
+    return this.routers.deletePermanently(id, actor);
   }
 }

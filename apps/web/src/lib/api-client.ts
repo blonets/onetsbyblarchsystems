@@ -239,7 +239,30 @@ export interface ApiClient {
   getRouter(id: string): Promise<RouterView>;
   createRouter(input: RouterInput): Promise<RouterView>;
   updateRouter(id: string, input: Partial<RouterInput>): Promise<RouterView>;
-  deleteRouter(id: string): Promise<void>;
+  deleteRouter(id: string, permanent?: boolean): Promise<void>;
+  deleteRouterPermanent(id: string): Promise<void>;
+  testRouterConnection(id: string): Promise<{
+    ok: boolean;
+    latencyMs: number;
+    message: string;
+    details?: { identity?: string; version?: string; board?: string; uptime?: string; cpu?: number };
+  }>;
+  syncRouter(id: string): Promise<{ ok: boolean; message: string; router?: RouterView }>;
+  reconcileHubSecrets(): Promise<{
+    totalHubSecrets: number;
+    keptCount: number;
+    removedCount: number;
+    removedSecrets: string[];
+  }>;
+  provisionDirect(input: {
+    host: string;
+    apiPort?: number;
+    username: string;
+    password: string;
+    siteId?: string;
+    identityName?: string;
+    tags?: string[];
+  }): Promise<RouterView>;
   rebootRouter(id: string): Promise<ApplyResult>;
   rotateRouterSecret(id: string): Promise<{ rotatedAt: string }>;
   getRouterResources(id: string): Promise<RouterResources>;
@@ -639,9 +662,91 @@ export class MockApiClient implements ApiClient {
     Object.assign(r, input, { updatedAt: nowIso() });
     return r;
   }
-  async deleteRouter(id: string): Promise<void> {
+  async deleteRouter(id: string, _permanent = false): Promise<void> {
     await this.wait();
     this.routers = this.routers.filter((x) => x.id !== id);
+  }
+  async deleteRouterPermanent(id: string): Promise<void> {
+    await this.wait();
+    this.routers = this.routers.filter((x) => x.id !== id);
+  }
+  async testRouterConnection(id: string): Promise<{
+    ok: boolean;
+    latencyMs: number;
+    message: string;
+    details?: { identity?: string; version?: string; board?: string; uptime?: string; cpu?: number };
+  }> {
+    await this.wait();
+    const r = this.routers.find((x) => x.id === id);
+    if (!r) throw this.notFound('Router');
+    r.status = 'online';
+    r.lastSeen = nowIso();
+    return {
+      ok: true,
+      latencyMs: 14,
+      message: 'Connection successful',
+      details: {
+        identity: r.identityName ?? undefined,
+        version: r.routerOsVersion ?? undefined,
+        board: r.boardName ?? undefined,
+        uptime: '12d 4h',
+        cpu: 12,
+      },
+    };
+  }
+  async syncRouter(id: string): Promise<{ ok: boolean; message: string; router: RouterView }> {
+    await this.wait();
+    const r = this.routers.find((x) => x.id === id);
+    if (!r) throw this.notFound('Router');
+    r.status = 'online';
+    r.lastSeen = nowIso();
+    return { ok: true, message: 'Router synchronized successfully', router: r };
+  }
+  async reconcileHubSecrets(): Promise<{
+    totalHubSecrets: number;
+    keptCount: number;
+    removedCount: number;
+    removedSecrets: string[];
+  }> {
+    await this.wait();
+    return { totalHubSecrets: 10, keptCount: 8, removedCount: 2, removedSecrets: ['test-del-1', 'test-del-2'] };
+  }
+  async provisionDirect(input: {
+    host: string;
+    apiPort?: number;
+    username: string;
+    password: string;
+    siteId?: string;
+    identityName?: string;
+    tags?: string[];
+  }): Promise<RouterView> {
+    await this.wait();
+    const r: RouterView = {
+      id: uid('r'),
+      uuid: uid('uuid'),
+      siteId: input.siteId ?? null,
+      tunnelIp: input.host,
+      sstpUsername: `direct-${input.host}`,
+      apiUsername: input.username,
+      apiPort: input.apiPort ?? 8728,
+      apiSslPort: 8729,
+      winboxPort: 8291,
+      sshPort: 22,
+      telnetPort: 23,
+      ftpPort: 21,
+      wwwPort: 80,
+      status: 'online',
+      identityName: input.identityName ?? 'direct-router',
+      flapCount: 0,
+      pollerShard: 0,
+      isHub: false,
+      tags: input.tags ?? [],
+      lastSeen: nowIso(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    this.routers.push(r);
+    return r;
   }
   async rebootRouter(id: string): Promise<ApplyResult> {
     await this.wait();
@@ -1410,6 +1515,8 @@ export class HttpApiClient implements ApiClient {
     if (filters?.status && filters.status !== 'all') q.set('status', filters.status);
     if (filters?.siteId) q.set('siteId', filters.siteId);
     if (filters?.tag) q.set('tag', filters.tag);
+    if (filters?.q) q.set('q', filters.q);
+    if (filters?.includeDecommissioned) q.set('includeDecommissioned', 'true');
     const s = q.toString();
     const res = await this.get<RouterView[] | Paginated<RouterView>>(`/routers${s ? `?${s}` : ''}`);
     let rows = Array.isArray(res) ? res : (res?.items ?? []);
@@ -1434,7 +1541,42 @@ export class HttpApiClient implements ApiClient {
   getRouter(id: string): Promise<RouterView> { return this.get(`/routers/${id}`); }
   createRouter(input: RouterInput): Promise<RouterView> { return this.post('/routers', input); }
   updateRouter(id: string, input: Partial<RouterInput>): Promise<RouterView> { return this.patch(`/routers/${id}`, input); }
-  deleteRouter(id: string): Promise<void> { return this.del(`/routers/${id}`); }
+  deleteRouter(id: string, permanent = false): Promise<void> {
+    return this.del(`/routers/${id}${permanent ? '?permanent=true' : ''}`);
+  }
+  deleteRouterPermanent(id: string): Promise<void> {
+    return this.del(`/routers/${id}/permanent`);
+  }
+  testRouterConnection(id: string): Promise<{
+    ok: boolean;
+    latencyMs: number;
+    message: string;
+    details?: { identity?: string; version?: string; board?: string; uptime?: string; cpu?: number };
+  }> {
+    return this.post(`/routers/${id}/test-connection`, {});
+  }
+  syncRouter(id: string): Promise<{ ok: boolean; message: string; router?: RouterView }> {
+    return this.post(`/routers/${id}/sync`, {});
+  }
+  reconcileHubSecrets(): Promise<{
+    totalHubSecrets: number;
+    keptCount: number;
+    removedCount: number;
+    removedSecrets: string[];
+  }> {
+    return this.post('/provisioning/reconcile-hub', {});
+  }
+  provisionDirect(input: {
+    host: string;
+    apiPort?: number;
+    username: string;
+    password: string;
+    siteId?: string;
+    identityName?: string;
+    tags?: string[];
+  }): Promise<RouterView> {
+    return this.post('/provisioning/direct', input);
+  }
   async rebootRouter(id: string): Promise<ApplyResult> {
     await this.get(`/routers/${id}/status`);
     return { applied: true, rolledBack: false, message: 'Reboot command queued (opId logged to audit)' };

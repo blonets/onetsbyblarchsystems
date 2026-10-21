@@ -153,7 +153,52 @@ export function useUpdateRouter(id: string) {
 export function useDeleteRouter() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => api.deleteRouter(id),
+    mutationFn: (target: { id: string; permanent?: boolean } | string) => {
+      const routerId = typeof target === 'string' ? target : target.id;
+      const isPerm = typeof target === 'string' ? false : (target.permanent ?? false);
+      return api.deleteRouter(routerId, isPerm);
+    },
+    onSettled: () => void qc.invalidateQueries({ queryKey: ['routers'] }),
+  });
+}
+export function useDeleteRouterPermanent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.deleteRouterPermanent(id),
+    onSettled: () => void qc.invalidateQueries({ queryKey: ['routers'] }),
+  });
+}
+export function useTestRouterConnection() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.testRouterConnection(id),
+    onSettled: (_d, _e, id) => {
+      void qc.invalidateQueries({ queryKey: keys.router(id) });
+      void qc.invalidateQueries({ queryKey: ['routers'] });
+    },
+  });
+}
+export function useSyncRouter() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.syncRouter(id),
+    onSettled: (_d, _e, id) => {
+      void qc.invalidateQueries({ queryKey: keys.router(id) });
+      void qc.invalidateQueries({ queryKey: ['routers'] });
+    },
+  });
+}
+export function useReconcileHubSecrets() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.reconcileHubSecrets(),
+    onSettled: () => void qc.invalidateQueries({ queryKey: ['routers'] }),
+  });
+}
+export function useProvisionDirect() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: Parameters<typeof api.provisionDirect>[0]) => api.provisionDirect(input),
     onSettled: () => void qc.invalidateQueries({ queryKey: ['routers'] }),
   });
 }

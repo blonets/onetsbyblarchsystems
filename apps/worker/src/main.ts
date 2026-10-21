@@ -81,6 +81,20 @@ function makeConnectionFactory(registry: RouterRegistry) {
   };
 }
 
+async function waitForApi(apiBase: string, maxRetries = 30, delayMs = 1500): Promise<void> {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const res = await fetch(`${apiBase}/health`);
+      if (res.ok) {
+        log(`API is ready at ${apiBase} (attempt ${i + 1})`);
+        return;
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, delayMs));
+  }
+  log(`API not ready after ${maxRetries} attempts; continuing with degraded state`);
+}
+
 async function main(): Promise<void> {
   const connection = { url: process.env.REDIS_URL ?? 'redis://localhost:6379' };
   const shardIndex = Number(process.env.WORKER_SHARD_INDEX ?? 0);
@@ -92,6 +106,9 @@ async function main(): Promise<void> {
   const internalKey = process.env.INTERNAL_API_KEY ?? process.env.WORKER_SERVICE_TOKEN ?? '';
   const usePostgres = !!process.env.DATABASE_URL;
   const hubRouterId = process.env.HUB_ROUTER_ID ?? 'hub';
+
+  // Wait for API to finish database migrations and report healthy before querying
+  await waitForApi(apiBase);
 
   const registry: RouterRegistry = new HttpRouterRegistry(apiBase, internalKey);
   const manager = new ConnectionManager(makeConnectionFactory(registry));

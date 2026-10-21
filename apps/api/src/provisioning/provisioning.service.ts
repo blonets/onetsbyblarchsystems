@@ -8,10 +8,14 @@ import {
   pppSecretList,
   pppSecretRemove,
   pppSecretSet,
+  pppActiveList,
+  pppActiveRemove,
   parsePppSecrets,
+  parsePppActive,
+  replyRows,
   type Transport,
 } from '@mtk/ros-api';
-import { newOpId, type OnboardCallback } from '@mtk/types';
+import { newOpId, type OnboardCallback, type Router } from '@mtk/types';
 import { AuditService } from '../audit/audit.service.js';
 import type { CurrentUserType } from '../common/types.js';
 import { DB_PORT, type DbPort } from '../db/database.port.js';
@@ -55,7 +59,7 @@ export const defaultTransportFactory: RosTransportFactory = (host, port) =>
 /** Prefix for throwaway hub secrets used by live tests. */
 export const DISPOSABLE_SECRET_PREFIX = 'test-del-';
 /** Hub secrets the platform must never touch. */
-const PROTECTED_SECRETS = new Set(['sstp-test-01']);
+const PROTECTED_SECRETS = new Set(['sstp-test-01', 'sstp-hub', 'osama-vpn', 'vps-dokploy-tunnel']);
 
 /** Onboarding token TTL: 15 minutes, single-use (ARCHITECTURE §6). */
 const TOKEN_TTL_HOURS = 0.25;
@@ -154,10 +158,28 @@ export class ProvisioningService {
       throw new Error(`refusing to delete hub secret with unmanaged name ${name}`);
     }
     await this.withHub(async (conn) => {
-      const rows = parsePppSecrets(await conn.talk(pppSecretList({ name })));
-      const secret = rows.find((r) => r.name === name);
-      if (!secret) throw new NotFoundException(`hub secret ${name} not found`);
-      await conn.talk(pppSecretRemove(secret.id));
+      // 1. Drop active PPP session if connected
+      try {
+        const active = parsePppActive(await conn.talk(pppActiveList({ name })));
+        for (const a of active) {
+          if (a.name === name) {
+            await conn.talk(pppActiveRemove(a.id));
+          }
+        }
+      } catch (err) {
+        // active session drop is best-effort
+      }
+
+      // 2. Remove PPP secret
+      try {
+        const rows = parsePppSecrets(await conn.talk(pppSecretList({ name })));
+        const secret = rows.find((r) => r.name === name);
+        if (secret) {
+          await conn.talk(pppSecretRemove(secret.id));
+        }
+      } catch (err) {
+        console.warn(`[provisioning] could not remove hub secret ${name}:`, (err as Error).message);
+      }
     });
   }
 
@@ -500,6 +522,199 @@ export class ProvisioningService {
       if (!t.usedAt && t.expiresAt.getTime() > now) used.add(t.tunnelIp);
     }
     return allocateTunnelIp(used);
+  }
+
+  /**
+   * Reconcile secrets on the Hub against active routers and live onboarding tokens.
+   * Removes orphaned `sstp-*` secrets that are no longer referenced in the platform.
+   */
+  async reconcileHubSecrets(): Promise<{
+    totalHubSecrets: number;
+    keptCount: number;
+    removedCount: number;
+    removedSecrets: string[];
+  }> {
+    const activeRouters = await this.db.routers.findMany({});
+    const activeUsernames = new Set(
+      activeRouters.filter((r) => r.status !== 'decommissioned').map((r) => r.sstpUsername),
+    );
+    const now = Date.now();
+    const liveTokens = await this.db.onboardingTokens.findMany({});
+    for (const t of liveTokens) {
+      if (!t.usedAt && t.expiresAt.getTime() > now) {
+        activeUsernames.add(t.sstpUsername);
+      }
+    }
+
+    const removedSecrets: string[] = [];
+    let totalHubSecrets = 0;
+    let keptCount = 0;
+
+    await this.withHub(async (conn) => {
+      const secrets = parsePppSecrets(await conn.talk(pppSecretList()));
+      totalHubSecrets = secrets.length;
+      for (const secret of secrets) {
+        if (PROTECTED_SECRETS.has(secret.name)) {
+          keptCount++;
+          continue;
+        }
+        if (secret.name.startsWith('sstp-') || secret.name.startsWith(DISPOSABLE_SECRET_PREFIX)) {
+          if (!activeUsernames.has(secret.name)) {
+            try {
+              // Also drop any stale active session for this username
+              const active = parsePppActive(await conn.talk(pppActiveList({ name: secret.name })));
+              for (const a of active) {
+                if (a.name === secret.name) {
+                  await conn.talk(pppActiveRemove(a.id));
+                }
+              }
+              await conn.talk(pppSecretRemove(secret.id));
+              removedSecrets.push(secret.name);
+            } catch (err) {
+              console.warn(`[reconcileHub] failed to remove secret ${secret.name}:`, err);
+            }
+          } else {
+            keptCount++;
+          }
+        } else {
+          keptCount++;
+        }
+      }
+    });
+
+    return {
+      totalHubSecrets,
+      keptCount,
+      removedCount: removedSecrets.length,
+      removedSecrets,
+    };
+  }
+
+  /**
+   * Direct IP / manual router onboarding (outside the SSTP tunnel wizard).
+   * Verifies connectivity, stamps identity/UUID, vaults credentials, and stores row.
+   */
+  async provisionDirect(
+    input: {
+      host: string;
+      apiPort?: number;
+      username: string;
+      password: string;
+      siteId?: string;
+      identityName?: string;
+      tags?: string[];
+    },
+    actor: CurrentUserType,
+  ): Promise<Router> {
+    const port = input.apiPort ?? 8728;
+    const factory = this.factory();
+    const transport = factory(input.host, port);
+    const conn = new RosConnection(transport);
+
+    try {
+      await conn.connect();
+      await conn.login(input.username, input.password);
+    } catch (err) {
+      await conn.close().catch(() => undefined);
+      throw new Error(`Failed to connect to router at ${input.host}:${port}: ${(err as Error).message}`);
+    }
+
+    let version: string | undefined;
+    let board: string | undefined;
+    let serial: string | undefined;
+    let identity: string | undefined;
+
+    try {
+      const res = replyRows(await conn.talk(['/system/resource/print']));
+      if (res[0]) {
+        version = res[0]['version'];
+        board = res[0]['board-name'];
+      }
+      const rb = replyRows(await conn.talk(['/system/routerboard/print']));
+      if (rb[0]) {
+        serial = rb[0]['serial-number'];
+      }
+      const idRes = replyRows(await conn.talk(['/system/identity/print']));
+      if (idRes[0]) {
+        identity = idRes[0]['name'];
+      }
+    } catch {}
+
+    const uuid = randomUUID();
+    // Stamp the uuid on the router
+    try {
+      await conn.talk(['/system/note/set', `=note=panel-uuid=${uuid}`]);
+    } catch {}
+
+    await conn.close().catch(() => undefined);
+
+    // Vault the passwords
+    const apiPasswordRef = await this.vault.store(input.password);
+    const sstpPasswordRef = await this.vault.store(randomBytes(24).toString('base64url'));
+
+    const routerRow = await this.db.routers.create({
+      uuid,
+      siteId: input.siteId ?? null,
+      tunnelIp: input.host,
+      sstpUsername: `direct-${randomBytes(4).toString('hex')}`,
+      sstpPasswordRef,
+      apiUsername: input.username,
+      apiPasswordRef,
+      apiPort: port,
+      identityName: input.identityName ?? identity ?? 'router-direct',
+      boardName: board ?? null,
+      routerOsVersion: version ?? null,
+      serialNumber: serial ?? null,
+      status: 'online',
+      tags: input.tags ?? [],
+    });
+
+    await this.db.routers.update({ id: routerRow.id }, { lastSeen: new Date() });
+
+    this.events.emitEvent('router.online', {
+      routerId: routerRow.id,
+      uuid: routerRow.uuid,
+      tunnelIp: routerRow.tunnelIp,
+      at: new Date().toISOString(),
+    });
+
+    await this.audit.append({
+      actorId: actor.sub,
+      routerId: routerRow.id,
+      action: 'provisioning.direct',
+      entityType: 'router',
+      entityId: routerRow.id,
+      after: { uuid, tunnelIp: input.host, version, board },
+      result: 'done',
+    });
+
+    return {
+      id: routerRow.id,
+      uuid: routerRow.uuid,
+      siteId: routerRow.siteId,
+      tunnelIp: routerRow.tunnelIp,
+      sstpUsername: routerRow.sstpUsername,
+      apiUsername: routerRow.apiUsername,
+      apiPort: routerRow.apiPort,
+      apiSslPort: routerRow.apiSslPort,
+      winboxPort: routerRow.winboxPort,
+      sshPort: routerRow.sshPort,
+      telnetPort: routerRow.telnetPort,
+      ftpPort: routerRow.ftpPort,
+      wwwPort: routerRow.wwwPort,
+      status: routerRow.status,
+      lastSeen: routerRow.lastSeen?.toISOString() ?? null,
+      routerOsVersion: routerRow.routerOsVersion,
+      boardName: routerRow.boardName,
+      serialNumber: routerRow.serialNumber,
+      identityName: routerRow.identityName,
+      tags: routerRow.tags ?? [],
+      flapCount: routerRow.flapCount,
+      pollerShard: routerRow.pollerShard,
+      createdAt: routerRow.createdAt.toISOString(),
+      updatedAt: routerRow.updatedAt.toISOString(),
+      decommissionedAt: routerRow.decommissionedAt?.toISOString() ?? null,
+    };
   }
 }
 

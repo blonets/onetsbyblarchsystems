@@ -1,11 +1,20 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { RosConnection, replyRows } from '@mtk/ros-api';
 import { newOpId, type Paginated, type Router, type RouterStatus } from '@mtk/types';
 import { AuditService } from '../audit/audit.service.js';
 import type { CurrentUserType } from '../common/types.js';
 import { DB_PORT, type DbPort, type NewRouter } from '../db/database.port.js';
 import type { RouterRow } from '../db/rows.js';
+import { EventsService } from '../events/events.module.js';
 import { JOBS_PORT, type JobsPort } from '../jobs/jobs.module.js';
+import {
+  ProvisioningService,
+  ROS_TRANSPORT_FACTORY,
+  type RosTransportFactory,
+  defaultTransportFactory,
+} from '../provisioning/provisioning.service.js';
+import { VAULT_PORT, type VaultPort } from '../vault/vault.port.js';
 import { CreateRouterDto, UpdateRouterDto } from './dto/router.dto.js';
 
 /**
@@ -21,7 +30,11 @@ export class RoutersService {
   constructor(
     @Inject(DB_PORT) private readonly db: DbPort,
     @Inject(JOBS_PORT) private readonly jobs: JobsPort,
+    @Inject(VAULT_PORT) private readonly vault: VaultPort,
+    private readonly provisioning: ProvisioningService,
+    private readonly events: EventsService,
     private readonly audit: AuditService,
+    @Optional() @Inject(ROS_TRANSPORT_FACTORY) private readonly transportFactory?: RosTransportFactory,
   ) {}
 
   async create(dto: CreateRouterDto, actor?: CurrentUserType): Promise<Router> {
@@ -67,30 +80,52 @@ export class RoutersService {
     page?: number;
     pageSize?: number;
     siteId?: string;
-    status?: RouterStatus;
+    status?: RouterStatus | 'all';
     tag?: string;
+    includeDecommissioned?: boolean;
+    q?: string;
   } = {}): Promise<Paginated<Router>> {
     const page = opts.page ?? 1;
     const pageSize = Math.min(opts.pageSize ?? 50, 500);
     const where: Record<string, unknown> = {};
     if (opts.siteId) where.siteId = opts.siteId;
-    if (opts.status) where.status = opts.status;
-    const total = opts.tag
-      ? (await this.db.routers.findMany({ where })).filter((r) => (r.tags ?? []).includes(opts.tag!)).length
-      : await this.db.routers.count(where);
+    if (opts.status && opts.status !== 'all') {
+      where.status = opts.status;
+    }
+
     let rows = await this.db.routers.findMany({
       where,
       orderBy: { createdAt: 'desc' },
-      ...(!opts.tag ? { skip: (page - 1) * pageSize, take: pageSize } : {}),
     });
-    // Tag filtering is done in the service (not the port contract) so both
-    // the Prisma adapter and the in-memory fake behave identically.
-    if (opts.tag) {
-      rows = rows
-        .filter((r) => (r.tags ?? []).includes(opts.tag!))
-        .slice((page - 1) * pageSize, page * pageSize);
+
+    // Exclude decommissioned by default unless explicitly requested
+    if (opts.status !== 'decommissioned' && opts.status !== 'all' && !opts.includeDecommissioned) {
+      if (!opts.status) {
+        rows = rows.filter((r) => r.status !== 'decommissioned');
+      }
     }
-    return { items: rows.map(toDto), total, page, pageSize };
+
+    // Tag filtering
+    if (opts.tag) {
+      rows = rows.filter((r) => (r.tags ?? []).includes(opts.tag!));
+    }
+
+    // Query search filtering
+    if (opts.q) {
+      const search = opts.q.toLowerCase().trim();
+      rows = rows.filter(
+        (r) =>
+          (r.identityName && r.identityName.toLowerCase().includes(search)) ||
+          (r.tunnelIp && r.tunnelIp.toLowerCase().includes(search)) ||
+          (r.uuid && r.uuid.toLowerCase().includes(search)) ||
+          (r.boardName && r.boardName.toLowerCase().includes(search)) ||
+          (r.routerOsVersion && r.routerOsVersion.toLowerCase().includes(search)),
+      );
+    }
+
+    const total = rows.length;
+    const paginatedRows = rows.slice((page - 1) * pageSize, page * pageSize);
+    return { items: paginatedRows.map(toDto), total, page, pageSize };
   }
 
   /**
@@ -179,6 +214,210 @@ export class RoutersService {
       result: 'pending',
     });
     return toDto(updated);
+  }
+
+  /**
+   * Permanently purge a router:
+   * 1. Remove Hub PPP secret and disconnect active session
+   * 2. Revoke Vault credentials
+   * 3. Clean up associated DB entities (hotspot, queues, downtimes, backups, etc.)
+   * 4. Remove Router row from database
+   * 5. Emit real-time event and audit
+   */
+  async deletePermanently(id: string, actor?: CurrentUserType): Promise<{ id: string; success: boolean }> {
+    const row = await this.require(id);
+    const opId = newOpId();
+
+    // 1. Hub cleanup: remove PPP secret and active session
+    if (row.sstpUsername) {
+      try {
+        await this.provisioning.deleteHubSecretByName(row.sstpUsername);
+      } catch (err) {
+        console.warn(`[routers] deletePermanently: hub cleanup skipped for ${row.sstpUsername}:`, (err as Error).message);
+      }
+    }
+
+    // 2. Vault cleanup: revoke stored credentials
+    if (row.sstpPasswordRef) {
+      await this.vault.revoke(row.sstpPasswordRef).catch(() => undefined);
+    }
+    if (row.apiPasswordRef) {
+      await this.vault.revoke(row.apiPasswordRef).catch(() => undefined);
+    }
+
+    // 3. Clean up child records (both in Prisma Cascade and in-memory DB)
+    try {
+      const tokens = await this.db.onboardingTokens.findMany({});
+      for (const t of tokens) {
+        if (t.routerId === id || t.sstpUsername === row.sstpUsername || t.tunnelIp === row.tunnelIp) {
+          await this.db.onboardingTokens.delete({ id: t.id }).catch(() => undefined);
+        }
+      }
+    } catch {}
+
+    await this.db.hotspotUsers.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.hotspotActiveSessions.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.hotspotBatches.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.hotspotWalledGardens.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.hotspotServers.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.hotspotUserProfiles.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.hotspotProfiles.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.firewallRules.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.firewallJournals.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.queues.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.downtimes.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.backups.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.backupSchedules.deleteMany({ routerId: id }).catch(() => undefined);
+    await this.db.downstreamDevices.deleteMany({ routerId: id }).catch(() => undefined);
+
+    // 4. Delete the Router row itself
+    await this.db.routers.delete({ id });
+
+    // 5. Emit real-time event and audit
+    this.events.emitEvent('router.deleted', {
+      routerId: id,
+      uuid: row.uuid,
+      tunnelIp: row.tunnelIp,
+      at: new Date().toISOString(),
+    });
+
+    await this.audit.append({
+      actorId: actor?.sub,
+      action: 'router.purge',
+      entityType: 'router',
+      entityId: id,
+      opId,
+      before: { uuid: row.uuid, tunnelIp: row.tunnelIp, sstpUsername: row.sstpUsername },
+      result: 'done',
+    });
+
+    return { id, success: true };
+  }
+
+  /**
+   * Live test connection to a router:
+   * Dials the router via ros-api on its tunnelIp and apiPort, validates credentials,
+   * measures round-trip latency, updates status and system resource info.
+   */
+  async testConnection(id: string): Promise<{
+    ok: boolean;
+    latencyMs: number;
+    message: string;
+    details?: {
+      identity?: string;
+      version?: string;
+      board?: string;
+      uptime?: string;
+      cpu?: number;
+    };
+  }> {
+    const router = await this.require(id);
+    const start = Date.now();
+    try {
+      const apiPassword = await this.vault.retrieve(router.apiPasswordRef);
+      const factory = this.transportFactory ?? defaultTransportFactory;
+      const transport = factory(router.tunnelIp, router.apiPort);
+      const conn = new RosConnection(transport);
+
+      try {
+        await conn.connect();
+        await conn.login(router.apiUsername, apiPassword);
+        const latencyMs = Date.now() - start;
+
+        let version: string | undefined;
+        let board: string | undefined;
+        let uptime: string | undefined;
+        let cpu: number | undefined;
+        let identity: string | undefined;
+
+        try {
+          const res = replyRows(await conn.talk(['/system/resource/print']));
+          if (res[0]) {
+            version = res[0]['version'];
+            board = res[0]['board-name'];
+            uptime = res[0]['uptime'];
+            cpu = res[0]['cpu-load'] ? Number(res[0]['cpu-load']) : undefined;
+          }
+        } catch {}
+
+        try {
+          const idRes = replyRows(await conn.talk(['/system/identity/print']));
+          if (idRes[0]) {
+            identity = idRes[0]['name'];
+          }
+        } catch {}
+
+        // Mark router as seen & online
+        await this.db.routers.update(
+          { id },
+          {
+            status: 'online',
+            lastSeen: new Date(),
+            ...(version ? { routerOsVersion: version } : {}),
+            ...(board ? { boardName: board } : {}),
+            ...(identity ? { identityName: identity } : {}),
+          },
+        );
+
+        this.events.emitEvent('router.online', {
+          routerId: id,
+          uuid: router.uuid,
+          tunnelIp: router.tunnelIp,
+          at: new Date().toISOString(),
+        });
+
+        return {
+          ok: true,
+          latencyMs,
+          message: 'Connection successful',
+          details: { identity, version, board, uptime, cpu },
+        };
+      } finally {
+        await conn.close().catch(() => undefined);
+      }
+    } catch (err) {
+      const latencyMs = Date.now() - start;
+      return {
+        ok: false,
+        latencyMs,
+        message: (err as Error).message || 'Connection failed',
+      };
+    }
+  }
+
+  /**
+   * Synchronize hardware, version, identity, and serial number from the physical device.
+   */
+  async sync(id: string, actor?: CurrentUserType): Promise<{
+    ok: boolean;
+    message: string;
+    router: Router;
+  }> {
+    const testRes = await this.testConnection(id);
+    if (!testRes.ok) {
+      return {
+        ok: false,
+        message: `Sync failed: ${testRes.message}`,
+        router: toDto(await this.require(id)),
+      };
+    }
+
+    const updated = await this.require(id);
+    await this.audit.append({
+      actorId: actor?.sub,
+      routerId: id,
+      action: 'router.sync',
+      entityType: 'router',
+      entityId: id,
+      after: { lastSeen: updated.lastSeen, version: updated.routerOsVersion, board: updated.boardName },
+      result: 'done',
+    });
+
+    return {
+      ok: true,
+      message: 'Router synchronized successfully',
+      router: toDto(updated),
+    };
   }
 
   /** Last-known status from the platform's point of view (worker heartbeats). */

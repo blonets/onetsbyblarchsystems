@@ -119,6 +119,8 @@ export interface OnboardingIssue {
   routerId: string;
   oneLineCommand: string;
   expiresAt: string;
+  tunnelIp?: string;
+  sstpUsername?: string;
 }
 
 export interface PlatformUser extends AuthUser {
@@ -159,6 +161,7 @@ export interface RouterFilters {
   siteId?: string;
   /** Single tag filter (operator grouping). */
   tag?: string;
+  includeDecommissioned?: boolean;
 }
 
 // ---------------------------------------------------------------------------
